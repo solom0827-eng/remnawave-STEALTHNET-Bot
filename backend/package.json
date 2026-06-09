@@ -1,7 +1,7 @@
 {
   "name": "stealthnet-api",
-  "version": "3.1.10",
-  "description": "STEALTHNET 3.0 — модульный Web API",
+  "version": "5.0.0",
+  "description": "STEALTHNET 5.0.0 — модульный Web API",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -12,10 +12,11 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "seed": "tsx src/scripts/seed-admin.ts"
+    "seed": "tsx src/scripts/seed-admin.ts",
+    "db:loadtest-clients": "tsx src/scripts/seed-loadtest-clients.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
@@ -24,11 +25,18 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "express-rate-limit": "^7.2.0",
+    "google-auth-library": "^10.6.1",
     "helmet": "^7.1.0",
+    "jose": "^6.2.0",
     "jsonwebtoken": "^9.0.2",
+    "lru-cache": "^11.2.7",
+    "maxmind": "^5.0.5",
     "multer": "^1.4.5-lts.1",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.1",
+    "otplib": "^13.3.0",
+    "socks-proxy-agent": "^9.0.0",
+    "undici": "^7.24.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -1,26 +1,87 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/contexts/auth";
 import {
   api,
   type ClientRecord,
   type UpdateClientPayload,
   type UpdateClientRemnaPayload,
+  type RemnaUserFull,
+  type RemnaUserUsageResponse,
+  type AdminClientSubscriptionItem,
+  type TariffCategoryWithTariffs,
+  type TariffRecord,
 } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Pencil, Trash2, Ban, ShieldCheck, Wifi, Ticket, KeyRound, Search, Filter } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Pencil, Trash2, Ban, ShieldCheck, Wifi, Ticket, KeyRound, Search,
+  Copy, Check, Smartphone, Activity, User, Users, HardDrive, Link,
+  RefreshCw, Loader2, Package, Gift, Coins, MailX, MailCheck, RotateCw,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { cn } from "@/lib/utils";
+import { motion } from "framer-motion";
+import { clientsBulkApi, type BulkClientAction } from "@/lib/admin-extras-api";
+import { ClientSubscriptionsTab } from "@/components/admin/client-subscriptions-tab";
+import { fmtMsk, fmtMskDate } from "@/lib/datetime";
 
+function formatTrafficBytes(bytes: number | null | undefined): string {
+  if (bytes == null || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, i)).toFixed(i > 1 ? 2 : 0)} ${units[i]}`;
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+const STATUS_MAP: Record<string, { label: string; color: string }> = {
+  ACTIVE: { label: "Активен", color: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20" },
+  DISABLED: { label: "Отключён", color: "bg-red-500/15 text-red-400 border-red-500/20" },
+  LIMITED: { label: "Лимит", color: "bg-amber-500/15 text-amber-400 border-amber-500/20" },
+  EXPIRED: { label: "Истёк", color: "bg-gray-500/15 text-gray-400 border-gray-500/20" },
+};
+
+function getOnlineStatus(onlineAt: string | null): { isOnline: boolean; label: string } {
+  if (!onlineAt) return { isOnline: false, label: "Не подключался" };
+  const diff = Date.now() - new Date(onlineAt).getTime();
+  if (diff < 2 * 60 * 1000) return { isOnline: true, label: "Онлайн" };
+  if (diff < 60 * 60 * 1000) return { isOnline: false, label: `${Math.floor(diff / 60000)} мин назад` };
+  if (diff < 24 * 60 * 60 * 1000) return { isOnline: false, label: `${Math.floor(diff / 3600000)} ч назад` };
+  return { isOnline: false, label: `${Math.floor(diff / 86400000)} дн назад` };
+}
 export function ClientsPage() {
+  const { t } = useTranslation();
   const { state } = useAuth();
   const [data, setData] = useState<{ items: ClientRecord[]; total: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<ClientRecord | null>(null);
   const [editForm, setEditForm] = useState<UpdateClientPayload & Partial<UpdateClientRemnaPayload>>({});
-  const [remnaData, setRemnaData] = useState<{ squads: { uuid: string; name?: string }[] }>({ squads: [] });
-  const [clientRemnaSquads, setClientRemnaSquads] = useState<string[]>([]);
   const [settings, setSettings] = useState<{ activeLanguages: string[]; activeCurrencies: string[] } | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -30,6 +91,18 @@ export function ClientsPage() {
   const [search, setSearch] = useState("");
   const [searchApplied, setSearchApplied] = useState("");
   const [filterBlocked, setFilterBlocked] = useState<"all" | "blocked" | "active">("all");
+
+  // ─── Bulk-actions state ───────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState<BulkClientAction | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ ok: number; failed: number } | null>(null);
+  // optional inputs
+  const [bulkAmount, setBulkAmount] = useState("");
+  const [bulkReason, setBulkReason] = useState("");
+
+  const [onlineStatuses, setOnlineStatuses] = useState<Record<string, { onlineAt: string | null }>>({});
+
   const token = state.accessToken!;
 
   useEffect(() => {
@@ -46,33 +119,92 @@ export function ClientsPage() {
     }).catch(() => setLoading(false));
   };
 
+  // ─── Bulk-actions helpers ─────────────────────────────────────────────
+  const allRowIds = (data?.items ?? []).map((c) => c.id);
+  const allSelected = allRowIds.length > 0 && allRowIds.every((id) => selectedIds.has(id));
+  function toggleId(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleAll() {
+    if (allSelected) setSelectedIds(new Set());
+    else setSelectedIds(new Set(allRowIds));
+  }
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setBulkError(null);
+    setBulkResult(null);
+    setBulkAmount("");
+    setBulkReason("");
+  }
+  async function runBulk(action: BulkClientAction) {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(action);
+    setBulkError(null);
+    setBulkResult(null);
+    try {
+      const params: { reason?: string; amount?: number } = {};
+      if (action === "credit_balance" || action === "debit_balance") {
+        const n = parseFloat(bulkAmount);
+        if (!Number.isFinite(n) || n <= 0) {
+          setBulkError("Введите положительное число для amount");
+          setBulkBusy(null);
+          return;
+        }
+        params.amount = n;
+      }
+      if (action === "block" && bulkReason) params.reason = bulkReason;
+
+      const r = await clientsBulkApi.bulk(token, {
+        action,
+        ids: Array.from(selectedIds),
+        params: Object.keys(params).length ? params : undefined,
+      });
+      setBulkResult({ ok: r.ok, failed: r.failed });
+      if (r.failed === 0) {
+        // полный успех — снимаем выделение и перезагружаем
+        setTimeout(() => {
+          setSelectedIds(new Set());
+          loadClients();
+        }, 1500);
+      } else {
+        loadClients();
+      }
+    } catch (e) {
+      setBulkError(e instanceof Error ? e.message : "bulk error");
+    } finally {
+      setBulkBusy(null);
+    }
+  }
+
   useEffect(() => {
     loadClients();
   }, [token, page, searchApplied, filterBlocked]);
+
+  useEffect(() => {
+    const uuids = data?.items
+      .map(c => c.remnawaveUuid)
+      .filter((u): u is string => Boolean(u)) ?? [];
+    if (uuids.length === 0) return;
+    
+    const poll = () => {
+      api.getClientsOnlineStatuses(token, uuids)
+        .then(setOnlineStatuses)
+        .catch(() => {});
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => clearInterval(interval);
+  }, [token, data?.items]);
 
   const applySearch = () => {
     setSearchApplied(search);
     setPage(1);
   };
-
-  useEffect(() => {
-    if (editing?.remnawaveUuid) {
-      api.getRemnaSquadsInternal(token).then((raw: unknown) => {
-        const res = raw as { response?: { internalSquads?: { uuid: string; name?: string }[] } };
-        const items = res?.response?.internalSquads ?? (Array.isArray(res) ? res : []);
-        setRemnaData({ squads: Array.isArray(items) ? items : [] });
-      }).catch(() => setRemnaData({ squads: [] }));
-      api.getClientRemna(token, editing.id).then((raw: unknown) => {
-        const res = raw as { response?: { activeInternalSquads?: Array<{ uuid?: string } | string> } };
-        const arr = res?.response?.activeInternalSquads ?? [];
-        const uuids = Array.isArray(arr) ? arr.map((s) => (typeof s === "string" ? s : s?.uuid)).filter((u): u is string => Boolean(u)) : [];
-        setClientRemnaSquads(uuids);
-      }).catch(() => setClientRemnaSquads([]));
-    } else {
-      setRemnaData({ squads: [] });
-      setClientRemnaSquads([]);
-    }
-  }, [token, editing?.id, editing?.remnawaveUuid]);
 
   function openEdit(c: ClientRecord) {
     setEditing(c);
@@ -84,6 +216,8 @@ export function ClientsPage() {
       isBlocked: c.isBlocked,
       blockReason: c.blockReason ?? undefined,
       referralPercent: c.referralPercent ?? undefined,
+      personalDiscountPercent: c.personalDiscountPercent ?? undefined,
+      personalDiscountIsOneTime: c.personalDiscountIsOneTime ?? false,
     });
     setActionMessage(null);
   }
@@ -101,32 +235,27 @@ export function ClientsPage() {
         isBlocked: editForm.isBlocked,
         blockReason: editForm.blockReason ?? null,
         referralPercent: editForm.referralPercent ?? null,
+        personalDiscountPercent: editForm.personalDiscountPercent ?? null,
+        personalDiscountIsOneTime: editForm.personalDiscountIsOneTime ?? false,
       });
       setEditing(updated);
-      setEditForm({});
-      setActionMessage("Сохранено");
+      // Пересоздаём форму из обновлённых данных, иначе input'ы (привязанные к editForm)
+      // показали бы пустые значения после save, и нужно было бы переоткрыть карточку.
+      setEditForm({
+        email: updated.email ?? undefined,
+        preferredLang: updated.preferredLang,
+        preferredCurrency: updated.preferredCurrency,
+        balance: updated.balance,
+        isBlocked: updated.isBlocked,
+        blockReason: updated.blockReason ?? undefined,
+        referralPercent: updated.referralPercent ?? undefined,
+        personalDiscountPercent: updated.personalDiscountPercent ?? undefined,
+        personalDiscountIsOneTime: updated.personalDiscountIsOneTime ?? false,
+      });
+      setActionMessage(t("admin.clients.saved"));
       loadClients();
     } catch (e) {
-      setActionMessage(e instanceof Error ? e.message : "Ошибка");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function saveRemnaLimits() {
-    if (!editing?.remnawaveUuid) return;
-    setSaving(true);
-    setActionMessage(null);
-    try {
-      const payload: UpdateClientRemnaPayload = {};
-      if (editForm.trafficLimitBytes !== undefined) payload.trafficLimitBytes = editForm.trafficLimitBytes;
-      if (editForm.trafficLimitStrategy) payload.trafficLimitStrategy = editForm.trafficLimitStrategy;
-      if (editForm.hwidDeviceLimit !== undefined) payload.hwidDeviceLimit = editForm.hwidDeviceLimit;
-      if (editForm.expireAt) payload.expireAt = editForm.expireAt;
-      await api.updateClientRemna(token, editing.id, payload);
-      setActionMessage("Лимиты Remna обновлены");
-    } catch (e) {
-      setActionMessage(e instanceof Error ? e.message : "Ошибка Remna");
+      setActionMessage(e instanceof Error ? e.message : t("admin.clients.error"));
     } finally {
       setSaving(false);
     }
@@ -143,176 +272,389 @@ export function ClientsPage() {
     }
   }
 
-  async function remnaAction(
-    name: string,
-    fn: () => Promise<unknown>
-  ) {
-    setActionMessage(null);
-    try {
-      await fn();
-      setActionMessage(name + " — ок");
-      loadClients();
-    } catch (e) {
-      setActionMessage(name + ": " + (e instanceof Error ? e.message : "ошибка"));
-    }
-  }
-
   async function saveClientPassword() {
     if (!editing) return;
     if (passwordForm.newPassword.length < 8) {
-      setPasswordMessage("Пароль не менее 8 символов");
+      setPasswordMessage(t("admin.clients.password_min_8"));
       return;
     }
     if (passwordForm.newPassword !== passwordForm.confirm) {
-      setPasswordMessage("Пароли не совпадают");
+      setPasswordMessage(t("admin.clients.passwords_mismatch"));
       return;
     }
     setPasswordMessage(null);
     setSavingPassword(true);
     try {
       await api.setClientPassword(token, editing.id, passwordForm.newPassword);
-      setPasswordMessage("Пароль установлен");
+      setPasswordMessage(t("admin.clients.password_set"));
       setPasswordForm({ newPassword: "", confirm: "" });
     } catch (e) {
-      setPasswordMessage(e instanceof Error ? e.message : "Ошибка");
+      setPasswordMessage(e instanceof Error ? e.message : t("admin.clients.error"));
     } finally {
       setSavingPassword(false);
     }
   }
 
-  async function squadAdd(squadUuid: string) {
-    if (!editing) return;
-    await remnaAction("Сквад добавлен", () => api.clientRemnaSquadAdd(token, editing.id, squadUuid));
-    setClientRemnaSquads((prev) => (prev.includes(squadUuid) ? prev : [...prev, squadUuid]));
-  }
-
-  async function squadRemove(squadUuid: string) {
-    if (!editing) return;
-    await remnaAction("Сквад снят", () => api.clientRemnaSquadRemove(token, editing.id, squadUuid));
-    setClientRemnaSquads((prev) => prev.filter((u) => u !== squadUuid));
-  }
-
-  if (loading && !data) return <div className="text-muted-foreground">Загрузка…</div>;
-  if (!data) return <div className="text-destructive">Ошибка загрузки</div>;
-
+  const totalPages = data ? Math.ceil(data.total / 20) : 0;
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Клиенты</h1>
-        <p className="text-muted-foreground">Пользователи бота, сайта и Mini App</p>
-      </div>
+    <div className="space-y-6 relative min-h-screen">
+      {/* Ambient Glows */}
+      <div className="fixed -z-10 bg-primary/15 blur-[120px] top-[-50px] left-[-50px] w-[300px] h-[300px] rounded-full pointer-events-none" />
+      <div className="fixed -z-10 bg-purple-500/10 blur-[100px] top-[20%] right-[-50px] w-[250px] h-[250px] rounded-full pointer-events-none" />
 
-      <Card>
-        <CardHeader className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle>Всего: {data.total}</CardTitle>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-                Назад
+      {/* HEADER */}
+      <motion.div
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="relative overflow-hidden flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between bg-background/40 backdrop-blur-3xl border border-white/10 p-6 rounded-[2rem] shadow-2xl"
+      >
+        {/* Decorative gradient orb in corner */}
+        <div className="absolute -top-16 -right-16 h-48 w-48 rounded-full bg-gradient-to-br from-primary/20 via-purple-500/15 to-transparent blur-2xl pointer-events-none" />
+        <div className="absolute -bottom-12 -left-12 h-32 w-32 rounded-full bg-gradient-to-tr from-cyan-500/15 to-transparent blur-2xl pointer-events-none" />
+
+        <div className="relative flex items-center gap-4">
+          <motion.div
+            whileHover={{ scale: 1.05, rotate: 4 }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+            className="relative h-14 w-14 rounded-2xl bg-gradient-to-br from-primary/30 via-purple-500/20 to-cyan-500/15 flex items-center justify-center shadow-inner border border-white/10 shrink-0"
+          >
+            <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-primary/10 to-transparent" />
+            <Users className="relative h-7 w-7 text-primary" />
+          </motion.div>
+          <div>
+            <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-foreground via-primary to-foreground/70 dark:from-foreground dark:via-primary dark:to-foreground/60">
+              {t("admin.clients.title")}
+            </h1>
+            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-[11px] font-semibold text-primary border border-primary/20 backdrop-blur-md">
+                <Users className="h-3 w-3" />
+                Всего: <span className="tabular-nums">{data?.total ?? 0}</span>
+              </span>
+              {data && data.items.length > 0 && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-500 dark:text-emerald-400 border border-emerald-500/20 backdrop-blur-md">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_#10b981]" />
+                  </span>
+                  Live
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        <Button variant="ghost" size="icon" onClick={loadClients} disabled={loading} className="relative h-9 w-9 rounded-full hover:bg-foreground/[0.06] dark:hover:bg-white/10">
+          <RefreshCw className={cn("h-4 w-4 text-muted-foreground transition-all", loading && "animate-[spin_1.5s_linear_infinite] text-primary")} />
+        </Button>
+      </motion.div>
+
+      {/* FILTERS */}
+      <Card className="bg-background/60 backdrop-blur-3xl border-white/10 p-4 rounded-[2rem] shadow-xl">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+            <Input
+              placeholder={t("admin.clients.search_placeholder")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && applySearch()}
+              className="pl-9 pr-20 bg-foreground/[0.03] dark:bg-white/[0.02] border-white/10 focus-visible:ring-primary/50 rounded-xl"
+            />
+            <Button
+              variant="secondary" size="sm"
+              className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-3 text-xs bg-primary/15 hover:bg-primary/25 text-primary border border-primary/20 rounded-lg"
+              onClick={applySearch}
+            >
+              {t("admin.clients.find")}
+            </Button>
+          </div>
+          <div className="flex items-center gap-1 bg-foreground/[0.03] dark:bg-white/[0.02] p-1 rounded-xl border border-white/5">
+            {(["all", "active", "blocked"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => { setFilterBlocked(f); setPage(1); }}
+                className={cn(
+                  "rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
+                  filterBlocked === f
+                    ? "bg-primary text-primary-foreground shadow-md"
+                    : "text-muted-foreground hover:text-foreground hover:bg-foreground/[0.05] dark:hover:bg-white/5"
+                )}
+              >
+                {f === "all" ? t("admin.clients.all") : f === "active" ? t("admin.clients.active") : t("admin.clients.blocked")}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {/* BULK ACTIONS BAR */}
+      {selectedIds.size > 0 && (
+        <Card className="bg-primary/10 backdrop-blur-3xl border-primary/30 p-4 rounded-2xl shadow-xl">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-4">
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="inline-flex items-center justify-center min-w-[28px] h-7 px-2 rounded-full bg-primary text-primary-foreground text-xs font-bold">
+                {selectedIds.size}
+              </span>
+              <span className="text-sm font-medium text-foreground">выбрано</span>
+              <button
+                onClick={clearSelection}
+                className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+              >
+                сбросить
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                placeholder="amount"
+                type="number"
+                value={bulkAmount}
+                onChange={(e) => setBulkAmount(e.target.value)}
+                className="h-8 w-[100px] text-xs rounded-lg bg-background/40 border-white/10"
+              />
+              <Input
+                placeholder="причина (для блокировки)"
+                value={bulkReason}
+                onChange={(e) => setBulkReason(e.target.value)}
+                className="h-8 w-[180px] text-xs rounded-lg bg-background/40 border-white/10"
+              />
+
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("block")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs border-rose-500/30 text-rose-500 hover:bg-rose-500/10"
+              >
+                {bulkBusy === "block" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Ban className="h-3 w-3" />}
+                Block
               </Button>
               <Button
-                variant="outline"
-                size="sm"
-                disabled={page * 20 >= data.total}
-                onClick={() => setPage((p) => p + 1)}
+                size="sm" variant="outline"
+                onClick={() => runBulk("unblock")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs border-emerald-500/30 text-emerald-500 hover:bg-emerald-500/10"
               >
-                Вперёд
+                {bulkBusy === "unblock" ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldCheck className="h-3 w-3" />}
+                Unblock
+              </Button>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("credit_balance")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs"
+              >
+                {bulkBusy === "credit_balance" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Coins className="h-3 w-3" />}
+                +Balance
+              </Button>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("debit_balance")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs"
+              >
+                {bulkBusy === "debit_balance" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Coins className="h-3 w-3" />}
+                −Balance
+              </Button>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("reset_trial")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs"
+              >
+                {bulkBusy === "reset_trial" ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
+                Reset Trial
+              </Button>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("mark_unreachable")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs"
+              >
+                {bulkBusy === "mark_unreachable" ? <Loader2 className="h-3 w-3 animate-spin" /> : <MailX className="h-3 w-3" />}
+                TG ✗
+              </Button>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => runBulk("mark_reachable")}
+                disabled={bulkBusy !== null}
+                className="h-8 rounded-lg gap-1.5 text-xs"
+              >
+                {bulkBusy === "mark_reachable" ? <Loader2 className="h-3 w-3 animate-spin" /> : <MailCheck className="h-3 w-3" />}
+                TG ✓
               </Button>
             </div>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-            <div className="flex flex-1 items-center gap-2">
-              <Search className="h-4 w-4 text-muted-foreground shrink-0" />
-              <Input
-                placeholder="Поиск: email, Telegram, реф. код, ID..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && applySearch()}
-                className="max-w-xs"
-              />
-              <Button variant="secondary" size="sm" onClick={applySearch}>
-                Искать
-              </Button>
+
+          {(bulkError || bulkResult) && (
+            <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-3 text-xs">
+              {bulkError && <span className="text-rose-500">{bulkError}</span>}
+              {bulkResult && (
+                <span className={cn("font-medium", bulkResult.failed === 0 ? "text-emerald-500" : "text-amber-500")}>
+                  Готово: {bulkResult.ok} ОК
+                  {bulkResult.failed > 0 && ` · ${bulkResult.failed} с ошибкой`}
+                </span>
+              )}
             </div>
-            <div className="flex items-center gap-2">
-              <Filter className="h-4 w-4 text-muted-foreground shrink-0" />
-              <select
-                className="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={filterBlocked}
-                onChange={(e) => {
-                  setFilterBlocked(e.target.value as "all" | "blocked" | "active");
-                  setPage(1);
-                }}
-              >
-                <option value="all">Все</option>
-                <option value="active">Только активные</option>
-                <option value="blocked">Только заблокированные</option>
-              </select>
-            </div>
+          )}
+        </Card>
+      )}
+
+      {/* TABLE */}
+      <Card className="bg-background/60 backdrop-blur-3xl border-white/10 rounded-[2rem] shadow-xl overflow-hidden relative min-h-[400px]">
+        {loading && !data ? (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-background/40 backdrop-blur-sm">
+            <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
+            <span className="text-sm font-medium text-muted-foreground">{t("admin.clients.loading")}</span>
           </div>
-        </CardHeader>
-        <CardContent>
+        ) : !data || data.items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <div className="h-16 w-16 rounded-full bg-white/5 flex items-center justify-center mb-4 border border-white/10">
+              <Users className="h-8 w-8 text-muted-foreground" />
+            </div>
+            <p className="text-muted-foreground font-medium">{t("admin.clients.loading_error")}</p>
+            {searchApplied && (
+              <Button variant="link" size="sm" className="mt-2 text-primary" onClick={() => { setSearch(""); setSearchApplied(""); }}>
+                {t("admin.common.refresh")}
+              </Button>
+            )}
+          </div>
+        ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left py-2 px-2">Email</th>
-                  <th className="text-left py-2 px-2">Telegram</th>
-                  <th className="text-left py-2 px-2">Нода</th>
-                  <th className="text-left py-2 px-2">Язык</th>
-                  <th className="text-left py-2 px-2">Валюта</th>
-                  <th className="text-left py-2 px-2">Баланс</th>
-                  <th className="text-left py-2 px-2">Реф.%</th>
-                  <th className="text-left py-2 px-2">Блок</th>
-                  <th className="text-left py-2 px-2">Дата</th>
-                  <th className="text-left py-2 px-2">Действия</th>
+            <table className="w-full text-sm text-left whitespace-nowrap">
+              <thead className="text-xs uppercase bg-foreground/[0.04] dark:bg-white/[0.04] text-muted-foreground border-b border-white/10">
+                <tr>
+                  <th className="px-6 py-4 rounded-tl-[2rem]">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-white/30 bg-background cursor-pointer accent-primary"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      onClick={(e) => e.stopPropagation()}
+                      aria-label="Выбрать всех"
+                    />
+                  </th>
+                  <th className="px-6 py-4 font-semibold tracking-wider">Пользователь</th>
+                  <th className="px-6 py-4 font-semibold tracking-wider">Контакты</th>
+                  <th className="px-6 py-4 font-semibold tracking-wider">Баланс & Дата</th>
+                  <th className="px-6 py-4 font-semibold tracking-wider">Статус</th>
+                  <th className="px-6 py-4 rounded-tr-[2rem] text-right">Действия</th>
                 </tr>
               </thead>
-              <tbody>
-                {data.items.map((c) => (
-                  <tr key={c.id} className="border-b">
-                    <td className="py-2 px-2">{c.email ?? "—"}</td>
-                    <td className="py-2 px-2">
-                      {c.telegramId != null || c.telegramUsername ? (
-                        <span title={c.telegramId ?? undefined}>
-                          {c.telegramUsername ? `@${c.telegramUsername}` : ""}
-                          {c.telegramUsername && c.telegramId ? " " : ""}
-                          {c.telegramId != null ? `(ID: ${c.telegramId})` : ""}
-                        </span>
-                      ) : "—"}
-                    </td>
-                    <td className="py-2 px-2">
-                      {c.activeNode ? (
-                        <span className="inline-flex items-center rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 text-xs font-medium">
-                          {c.activeNode}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
+              <tbody className="divide-y divide-white/5">
+                {data.items.map((c, idx) => {
+                  const onlineAt = onlineStatuses[c.remnawaveUuid ?? ""]?.onlineAt ?? c.onlineAt ?? null;
+                  const status = getOnlineStatus(onlineAt);
+                  
+                  return (
+                    <motion.tr
+                      key={c.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: idx * 0.02 }}
+                      onClick={() => openEdit(c)}
+                      className={cn(
+                        "group cursor-pointer transition-all duration-200 border-l-[3px] border-l-transparent hover:bg-white/5 hover:border-l-primary/50",
+                        c.isBlocked && "bg-red-500/5 hover:bg-red-500/10 border-l-red-500/50"
                       )}
-                    </td>
-                    <td className="py-2 px-2">{c.preferredLang}</td>
-                    <td className="py-2 px-2">{c.preferredCurrency}</td>
-                    <td className="py-2 px-2">{c.balance}</td>
-                    <td className="py-2 px-2">{c.referralPercent != null ? c.referralPercent + "%" : "—"}</td>
-                    <td className="py-2 px-2">{c.isBlocked ? <span className="text-destructive">Да</span> : "—"}</td>
-                    <td className="py-2 px-2 text-muted-foreground">
-                      {new Date(c.createdAt).toLocaleDateString()}
-                    </td>
-                    <td className="py-2 px-2 flex gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => openEdit(c)} title="Редактировать">
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => deleteClient(c)} title="Удалить" className="text-destructive">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
+                    >
+                      <td className="px-6 py-4 w-10" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-white/30 bg-background cursor-pointer accent-primary"
+                          checked={selectedIds.has(c.id)}
+                          onChange={() => toggleId(c.id)}
+                          aria-label={`Выбрать клиента ${c.id}`}
+                        />
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/20 to-purple-500/20 text-primary border border-white/10">
+                            <User className="h-5 w-5" />
+                          </div>
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-foreground">
+                                {c.telegramUsername ? `@${c.telegramUsername}` : c.email || `ID: ${c.telegramId ?? c.id.slice(0, 8)}`}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <span className={cn("inline-flex h-2 w-2 rounded-full", status.isOnline ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" : "bg-gray-500/50")} />
+                              <span className="text-[10px] text-muted-foreground">{status.label}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+                          {c.email && c.telegramUsername && <div className="flex items-center gap-1"><span className="text-foreground/80">{c.email}</span></div>}
+                          {c.telegramId && <div className="flex items-center gap-1">TG: <span className="text-foreground/80">{c.telegramId}</span></div>}
+                          <div className="uppercase text-[10px] bg-white/5 px-1.5 py-0.5 rounded max-w-fit border border-white/5 mt-0.5">{c.preferredLang}</div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col gap-1.5">
+                          <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-2 py-1 font-medium text-xs border border-white/5 max-w-fit">
+                            {c.balance.toFixed(2)} {c.preferredCurrency.toUpperCase()}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">{fmtMskDate(c.createdAt)}</span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col gap-1.5">
+                          {c.isBlocked && (
+                            <span className="inline-flex items-center rounded-full bg-red-500/15 text-red-400 px-2.5 py-0.5 text-[11px] font-medium border border-red-500/20 backdrop-blur-md max-w-fit shadow-sm">
+                              <Ban className="h-3 w-3 mr-1" /> {t("admin.clients.block")}
+                            </span>
+                          )}
+                          {c.activeNode && (
+                            <span className="inline-flex items-center rounded-full bg-emerald-500/15 text-emerald-400 px-2.5 py-0.5 text-[11px] font-medium border border-emerald-500/20 backdrop-blur-md max-w-fit shadow-sm">
+                              <Activity className="h-3 w-3 mr-1" /> {c.activeNode}
+                            </span>
+                          )}
+                          {!c.isBlocked && !c.activeNode && (
+                            <span className="text-muted-foreground text-xs">—</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0">
+                          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-foreground/[0.06] dark:hover:bg-white/10 hover:text-foreground" onClick={(e) => { e.stopPropagation(); openEdit(c); }} title="Редактировать">
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-red-500/20 text-destructive" onClick={(e) => { e.stopPropagation(); deleteClient(c); }} title="Удалить">
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </td>
+                    </motion.tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
-        </CardContent>
+        )}
       </Card>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between bg-background/40 backdrop-blur-3xl border border-white/10 p-3 rounded-[1.5rem]">
+          <span className="text-sm font-medium text-muted-foreground px-3">
+            {page} / {totalPages}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(1)} className="h-8 w-8 p-0 rounded-lg bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08] border-white/10 rounded-lg">
+              «
+            </Button>
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)} className="h-8 px-3 rounded-lg bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08] border-white/10 rounded-lg">
+              {t("admin.common.back")}
+            </Button>
+            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)} className="h-8 px-3 rounded-lg bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08] border-white/10 rounded-lg">
+              {t("admin.sales.next")}
+            </Button>
+            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(totalPages)} className="h-8 w-8 p-0 rounded-lg bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08] border-white/10 rounded-lg">
+              »
+            </Button>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <ClientEditModal
@@ -321,8 +663,6 @@ export function ClientsPage() {
           setEditForm={setEditForm}
           saving={saving}
           actionMessage={actionMessage}
-          remnaData={remnaData}
-          clientRemnaSquads={clientRemnaSquads}
           activeLanguages={settings?.activeLanguages ?? []}
           activeCurrencies={settings?.activeCurrencies ?? []}
           onClose={() => {
@@ -331,10 +671,6 @@ export function ClientsPage() {
             setPasswordMessage(null);
           }}
           onSave={saveClient}
-          onSaveRemnaLimits={saveRemnaLimits}
-          onRemnaAction={remnaAction}
-          onSquadAdd={squadAdd}
-          onSquadRemove={squadRemove}
           onSetPassword={saveClientPassword}
           passwordForm={passwordForm}
           setPasswordForm={setPasswordForm}
@@ -353,13 +689,8 @@ function ClientEditModal({
   setEditForm,
   saving,
   actionMessage,
-  remnaData,
   onClose,
   onSave,
-  onSaveRemnaLimits,
-  onRemnaAction,
-  onSquadAdd,
-  onSquadRemove,
   onSetPassword,
   passwordForm,
   setPasswordForm,
@@ -368,23 +699,16 @@ function ClientEditModal({
   token,
   activeLanguages,
   activeCurrencies,
-  clientRemnaSquads,
 }: {
   client: ClientRecord;
   editForm: UpdateClientPayload & Partial<UpdateClientRemnaPayload>;
   setEditForm: React.Dispatch<React.SetStateAction<UpdateClientPayload & Partial<UpdateClientRemnaPayload>>>;
   saving: boolean;
   actionMessage: string | null;
-  remnaData: { squads: { uuid: string; name?: string }[] };
-  clientRemnaSquads: string[];
   activeLanguages: string[];
   activeCurrencies: string[];
   onClose: () => void;
   onSave: () => Promise<void>;
-  onSaveRemnaLimits: () => Promise<void>;
-  onRemnaAction: (name: string, fn: () => Promise<unknown>) => Promise<void>;
-  onSquadAdd: (squadUuid: string) => Promise<void>;
-  onSquadRemove: (squadUuid: string) => Promise<void>;
   onSetPassword: () => Promise<void>;
   passwordForm: { newPassword: string; confirm: string };
   setPasswordForm: React.Dispatch<React.SetStateAction<{ newPassword: string; confirm: string }>>;
@@ -392,333 +716,945 @@ function ClientEditModal({
   savingPassword: boolean;
   token: string;
 }) {
+  const { t } = useTranslation();
+  const [tab, setTab] = useState("profile");
+  const [remnaUser, setRemnaUser] = useState<RemnaUserFull | null>(null);
+  const [, setRemnaLoading] = useState(false);
+  // devices-список теперь во вложенном <ClientAllDevicesTab>.
+  // Здесь оставляем только total — для бейджа на вкладке.
+  const [devicesTotal, setDevicesTotal] = useState(0);
+  // inline-редактор реферера (кто привёл клиента).
+  const [referrerInfo, setReferrerInfo] = useState<ClientRecord["referrer"]>(undefined);
+  const [referrerInput, setReferrerInput] = useState("");
+  const [referrerLookupBy, setReferrerLookupBy] = useState<"referralCode" | "username" | "tgid" | "id">("referralCode");
+  const [referrerSaving, setReferrerSaving] = useState(false);
+  const [referrerMessage, setReferrerMessage] = useState<string | null>(null);
+  const [usageData, setUsageData] = useState<RemnaUserUsageResponse["response"] | null>(null);
+  // раньше тут грузили через getSecondarySubscriptions(search=clientId).
+  // Этот endpoint был для глобальной страницы /admin/secondary-subscriptions и работал
+  // через text-search по нескольким полям — для мигрированных клиентов случались
+  // false-negatives (показывало «У клиента ещё нет подписок» когда subs в DB были).
+  // Теперь используем дедикатед /admin/clients/:id/subscriptions — точный фильтр по
+  // ownerId + giftedToClientId, возвращает ВСЕ subs клиента (включая root index=0).
+  const [secondarySubs, setSecondarySubs] = useState<AdminClientSubscriptionItem[]>([]);
+  const [secondarySubsLoading, setSecondarySubsLoading] = useState(false);
+
+  const [tariffCategories, setTariffCategories] = useState<TariffCategoryWithTariffs[]>([]);
+  const [selectedGrantTariffId, setSelectedGrantTariffId] = useState<string>("");
+  // Выбранная опция длительности из priceOptions выбранного тарифа
+  const [selectedGrantOptionId, setSelectedGrantOptionId] = useState<string>("");
+  // кастомный лимит трафика в GB (override тарифа).
+  // Пустая строка → используется лимит тарифа. Поле показывается только для НЕ-безлимитных тарифов.
+  const [grantTrafficGb, setGrantTrafficGb] = useState<string>("");
+  // override длительности в днях. Пустая строка → используется
+  // длительность выбранной опции / тарифа по умолчанию.
+  const [grantCustomDays, setGrantCustomDays] = useState<string>("");
+  const [grantNote, setGrantNote] = useState<string>("");
+  const [grantLoading, setGrantLoading] = useState(false);
+  const [grantMessage, setGrantMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+
+  const loadRemnaUser = useCallback(() => {
+    if (!editing.remnawaveUuid) return;
+    setRemnaLoading(true);
+    api.getClientRemna(token, editing.id).then((raw: unknown) => {
+      const resp = (raw as Record<string, unknown>)?.response ?? raw;
+      setRemnaUser(resp as RemnaUserFull);
+    }).catch(() => {}).finally(() => setRemnaLoading(false));
+  }, [token, editing.id, editing.remnawaveUuid]);
+
+  // Тут только обновляем total для бейджа — сам список рендерится в ClientAllDevicesTab.
+  const loadDevices = useCallback(() => {
+    api.getClientAllDevices(token, editing.id).then((r) => {
+      setDevicesTotal(r.total);
+    }).catch(() => {});
+  }, [token, editing.id]);
+
+  const loadUsage = useCallback(() => {
+    if (!editing.remnawaveUuid) return;
+    api.getClientRemnaUsage(token, editing.id, 30).then((d) => {
+      setUsageData(d.response ?? null);
+    }).catch(() => {});
+  }, [token, editing.id, editing.remnawaveUuid]);
+
+  const loadSecondarySubs = useCallback(() => {
+    setSecondarySubsLoading(true);
+    api.getClientSubscriptionsList(token, editing.id)
+      .then((r) => setSecondarySubs(r.items ?? []))
+      .catch(() => setSecondarySubs([]))
+      .finally(() => setSecondarySubsLoading(false));
+  }, [token, editing.id]);
+
+  // догружаем реферера (список клиентов его не отдаёт).
+  const loadReferrer = useCallback(() => {
+    api.getClientDetail(token, editing.id)
+      .then((full) => setReferrerInfo(full.referrer ?? null))
+      .catch(() => setReferrerInfo(null));
+  }, [token, editing.id]);
+
+  async function attachReferrer() {
+    if (!referrerInput.trim()) return;
+    setReferrerSaving(true);
+    setReferrerMessage(null);
+    try {
+      const res = await api.setReferralReferrer(token, editing.id, referrerInput.trim(), referrerLookupBy);
+      loadReferrer();
+      setReferrerInput("");
+      setReferrerMessage(res.referrerId ? "✅ Реферер привязан" : "Реферер убран");
+    } catch (e) {
+      setReferrerMessage(e instanceof Error ? e.message : "Ошибка привязки");
+    } finally {
+      setReferrerSaving(false);
+    }
+  }
+
+  async function detachReferrer() {
+    setReferrerSaving(true);
+    setReferrerMessage(null);
+    try {
+      await api.setReferralReferrer(token, editing.id, null);
+      setReferrerInfo(null);
+      setReferrerMessage("Реферер убран");
+    } catch (e) {
+      setReferrerMessage(e instanceof Error ? e.message : "Ошибка");
+    } finally {
+      setReferrerSaving(false);
+    }
+  }
+
   useEffect(() => {
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onEscape);
-    return () => window.removeEventListener("keydown", onEscape);
-  }, [onClose]);
+    loadRemnaUser();
+    loadDevices();
+    loadUsage();
+    loadSecondarySubs();
+    loadReferrer();
+  }, [loadRemnaUser, loadDevices, loadUsage, loadSecondarySubs, loadReferrer]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getTariffCategories(token)
+      .then((r) => { if (!cancelled) setTariffCategories(r.items ?? []); })
+      .catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  const flatTariffs: TariffRecord[] = tariffCategories.flatMap((c) => c.tariffs ?? []);
+
+  const handleGrantTariff = async () => {
+    if (!selectedGrantTariffId) return;
+    setGrantLoading(true);
+    setGrantMessage(null);
+    try {
+      // парсим override трафика — GB → bytes.
+      // Пустая строка / некорректное число → null (используется лимит тарифа).
+      let trafficLimitBytesOverride: number | null | undefined;
+      const trimmed = grantTrafficGb.trim();
+      if (trimmed !== "") {
+        const gb = parseFloat(trimmed.replace(",", "."));
+        if (Number.isFinite(gb) && gb >= 0) {
+          trafficLimitBytesOverride = Math.round(gb * 1024 ** 3);
+        }
+      }
+      // парсим override длительности. Пустая строка / не-число → не шлём.
+      let customDurationDaysOverride: number | undefined;
+      const daysTrimmed = grantCustomDays.trim();
+      if (daysTrimmed !== "") {
+        const days = parseInt(daysTrimmed, 10);
+        if (Number.isFinite(days) && days >= 1 && days <= 3650) {
+          customDurationDaysOverride = days;
+        }
+      }
+      const res = await api.grantClientTariff(token, editing.id, {
+        tariffId: selectedGrantTariffId,
+        tariffPriceOptionId: selectedGrantOptionId || undefined,
+        note: grantNote.trim() || undefined,
+        ...(trafficLimitBytesOverride !== undefined ? { trafficLimitBytes: trafficLimitBytesOverride } : {}),
+        ...(customDurationDaysOverride !== undefined ? { customDurationDays: customDurationDaysOverride } : {}),
+      });
+      if (res.ok) {
+        setGrantMessage({
+          type: "ok",
+          text: t("admin.clients.grant_tariff_success", {
+            defaultValue: "Тариф «{{name}}» выдан ({{days}} дн.)",
+            name: res.tariff?.name ?? "",
+            days: res.tariff?.durationDays ?? 0,
+          }),
+        });
+        setGrantNote("");
+        setGrantTrafficGb("");
+        setGrantCustomDays("");
+        loadRemnaUser();
+        loadDevices();
+        loadUsage();
+        loadSecondarySubs();
+      } else {
+        setGrantMessage({ type: "err", text: res.message ?? t("admin.clients.grant_tariff_error", "Не удалось выдать тариф") });
+      }
+    } catch (e) {
+      setGrantMessage({
+        type: "err",
+        text: e instanceof Error ? e.message : t("admin.clients.grant_tariff_error", "Не удалось выдать тариф"),
+      });
+    } finally {
+      setGrantLoading(false);
+    }
+  };
+
+  const trafficUsed = remnaUser?.userTraffic?.usedTrafficBytes ?? 0;
+  const trafficLimit = remnaUser?.trafficLimitBytes ?? 0;
+  const trafficLifetime = remnaUser?.userTraffic?.lifetimeUsedTrafficBytes ?? 0;
+  const trafficPercent = trafficLimit > 0 ? Math.min((trafficUsed / trafficLimit) * 100, 100) : 0;
+
+  const statusInfo = STATUS_MAP[remnaUser?.status ?? ""] ?? { label: remnaUser?.status ?? "—", color: "bg-muted" };
+
+  const isOnline = remnaUser?.userTraffic?.onlineAt != null;
+  const onlineAt = remnaUser?.userTraffic?.onlineAt;
+
+  const totalUsageLast30 = usageData?.sparklineData?.reduce((a, b) => a + b, 0) ?? 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <Card className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col border-primary/50 shadow-xl">
-        <CardHeader className="flex flex-row items-center justify-between shrink-0">
-          <CardTitle>Редактировать клиента</CardTitle>
-          <Button variant="ghost" size="sm" onClick={onClose}>Закрыть</Button>
-        </CardHeader>
-        <div className="overflow-y-auto px-6 pb-6">
-          <div className="mb-4 p-3 rounded-md bg-muted/50 text-sm">
-            <div className="font-medium mb-1">Клиент</div>
-            <div className="space-y-0.5 text-muted-foreground">
-              {editing.email && <div>Email: {editing.email}</div>}
-              <div>
-                Telegram username: {editing.telegramUsername ? `@${editing.telegramUsername}` : "—"}
+    <Dialog open={true} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto p-0 gap-0 bg-background/80 backdrop-blur-3xl border-white/10 shadow-2xl sm:rounded-[2rem] [&>button]:z-50">
+        <div className="absolute top-0 right-0 w-[500px] h-[300px] bg-primary/10 blur-[100px] pointer-events-none rounded-full" />
+        <div className="absolute bottom-0 left-0 w-[400px] h-[300px] bg-purple-500/10 blur-[100px] pointer-events-none rounded-full" />
+        <div className="p-6 border-b border-white/10 relative z-10 bg-white/5">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary/20 to-purple-500/20 border border-white/10 flex items-center justify-center shadow-inner shrink-0">
+                <User className="h-6 w-6 text-primary" />
               </div>
-              <div>
-                Telegram ID: {editing.telegramId != null ? editing.telegramId : "—"}
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="truncate">{editing.email || editing.telegramUsername ? `@${editing.telegramUsername}` : editing.telegramId || "Клиент"}</span>
+                  {editing.remnawaveUuid && (
+                    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium", statusInfo.color)}>
+                      {statusInfo.label}
+                    </span>
+                  )}
+                  {editing.isBlocked && (
+                    <span className="inline-flex items-center rounded-full bg-red-500/10 text-red-700 dark:text-red-400 border border-red-500/20 px-2 py-0.5 text-[11px] font-medium">
+                      {t("admin.clients.is_blocked")}
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground font-normal mt-0.5">
+                  {t("admin.clients.created")} {fmtMsk(editing.createdAt)}
+                  {remnaUser?.shortUuid && <> &middot; <code className="text-[10px]">{remnaUser.shortUuid}</code></>}
+                </div>
               </div>
-              <div>ID в панели: {editing.id}</div>
-              <div>
-                Реферальный код: {editing.referralCode ? (
-                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{editing.referralCode}</code>
-                ) : "—"}
+            </DialogTitle>
+            <DialogDescription className="sr-only">{t("admin.clients.modal_title")}</DialogDescription>
+          </DialogHeader>
+        </div>
+
+        {editing.remnawaveUuid && remnaUser && (
+          <div className="px-6 pt-4 relative z-10">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-[1.5rem] bg-gradient-to-br from-foreground/[0.03] to-foreground/[0.05] dark:from-white/5 dark:to-white/10 border border-white/10 p-5 space-y-1.5 hover:from-foreground/[0.05] hover:to-foreground/[0.07] dark:hover:from-white/[0.08] dark:hover:to-white/[0.12] transition-colors">
+                <div className="text-[11px] text-muted-foreground uppercase tracking-wider">{t("admin.clients.traffic")}</div>
+                <div className="text-lg font-bold">{formatTrafficBytes(trafficUsed)}</div>
+                {trafficLimit > 0 && (
+                  <>
+                    <div className="text-[11px] text-muted-foreground">из {formatTrafficBytes(trafficLimit)}</div>
+                    <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={cn("h-full rounded-full transition-all",
+                          trafficPercent > 90 ? "bg-red-500" : trafficPercent > 70 ? "bg-amber-500" : "bg-green-500"
+                        )}
+                        style={{ width: `${trafficPercent}%` }}
+                      />
+                    </div>
+                  </>
+                )}
+                {trafficLimit === 0 && <div className="text-[11px] text-muted-foreground">{t("admin.clients.unlimited")}</div>}
               </div>
-              <div>
-                Рефералов: {editing._count?.referrals ?? 0}
+              <div className="rounded-[1.5rem] bg-gradient-to-br from-foreground/[0.03] to-foreground/[0.05] dark:from-white/5 dark:to-white/10 border border-white/10 p-5 space-y-1.5 hover:from-foreground/[0.05] hover:to-foreground/[0.07] dark:hover:from-white/[0.08] dark:hover:to-white/[0.12] transition-colors">
+                <div className="text-[11px] text-muted-foreground uppercase tracking-wider">{t("admin.clients.traffic_30d")}</div>
+                <div className="text-lg font-bold">{formatTrafficBytes(totalUsageLast30)}</div>
+                <div className="text-[11px] text-muted-foreground">{t("admin.clients.total_traffic")} {formatTrafficBytes(trafficLifetime)}</div>
+              </div>
+              <div className="rounded-[1.5rem] bg-gradient-to-br from-foreground/[0.03] to-foreground/[0.05] dark:from-white/5 dark:to-white/10 border border-white/10 p-5 space-y-1.5 hover:from-foreground/[0.05] hover:to-foreground/[0.07] dark:hover:from-white/[0.08] dark:hover:to-white/[0.12] transition-colors">
+                <div className="text-[11px] text-muted-foreground uppercase tracking-wider">{t("admin.clients.devices")}</div>
+                <div className="text-lg font-bold">{devicesTotal}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {t("admin.clients.device_limit")} {remnaUser.hwidDeviceLimit != null ? remnaUser.hwidDeviceLimit : "—"}
+                </div>
+              </div>
+              <div className="rounded-[1.5rem] bg-gradient-to-br from-foreground/[0.03] to-foreground/[0.05] dark:from-white/5 dark:to-white/10 border border-white/10 p-5 space-y-1.5 hover:from-foreground/[0.05] hover:to-foreground/[0.07] dark:hover:from-white/[0.08] dark:hover:to-white/[0.12] transition-colors">
+                <div className="text-[11px] text-muted-foreground uppercase tracking-wider">{t("admin.clients.status")}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className={cn("h-2 w-2 rounded-full", isOnline ? "bg-green-500 animate-pulse" : "bg-gray-400")} />
+                  <span className="text-sm font-medium">{isOnline ? t("admin.clients.status_online") : t("admin.clients.status_offline")}</span>
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {onlineAt ? `${t("admin.clients.last_seen")} ${fmtMsk(onlineAt)}` :
+                    remnaUser.userTraffic?.firstConnectedAt ? `${t("admin.clients.first_login")} ${fmtMskDate(remnaUser.userTraffic.firstConnectedAt)}` : t("admin.clients.no_data")}
+                </div>
               </div>
             </div>
           </div>
-          <CardContent className="p-0 space-y-6">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Email</Label>
-                <Input
-                  value={editForm.email ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value || undefined }))}
-                  placeholder="email@example.com"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Язык</Label>
-                <Select
-                  value={editForm.preferredLang ?? ""}
-                  onChange={(v) => setEditForm((f) => ({ ...f, preferredLang: v }))}
-                  options={(() => {
-                    const langs = activeLanguages.length ? activeLanguages.map((l) => l.trim()) : ["ru", "en"];
-                    const current = (editForm.preferredLang ?? editing.preferredLang ?? "").trim();
-                    const set = new Set(langs);
-                    if (current && !set.has(current)) set.add(current);
-                    return [...set].map((l) => ({ value: l, label: l }));
-                  })()}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Валюта</Label>
-                <Select
-                  value={editForm.preferredCurrency ?? ""}
-                  onChange={(v) => setEditForm((f) => ({ ...f, preferredCurrency: v }))}
-                  options={(() => {
-                    const currs = activeCurrencies.length ? activeCurrencies.map((c) => c.trim()) : ["usd", "rub"];
-                    const current = (editForm.preferredCurrency ?? editing.preferredCurrency ?? "").trim();
-                    const set = new Set(currs);
-                    if (current && !set.has(current)) set.add(current);
-                    return [...set].map((c) => ({ value: c, label: c.toUpperCase() }));
-                  })()}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Баланс</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={editForm.balance ?? 0}
-                  onChange={(e) => setEditForm((f) => ({ ...f, balance: Number(e.target.value) || 0 }))}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Реферальный % (личный)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={editForm.referralPercent ?? ""}
-                  onChange={(e) =>
-                    setEditForm((f) => ({
-                      ...f,
-                      referralPercent: e.target.value === "" ? undefined : Number(e.target.value),
-                    }))
-                  }
-                  placeholder="по умолчанию из настроек"
-                />
-              </div>
-              <div className="space-y-2 flex items-end gap-2">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={editForm.isBlocked ?? false}
-                    onChange={(e) => setEditForm((f) => ({ ...f, isBlocked: e.target.checked }))}
-                  />
-                  <span>Заблокирован</span>
-                </label>
-              </div>
-              {(editForm.isBlocked ?? editing.isBlocked) && (
-                <div className="space-y-2 sm:col-span-2">
-                  <Label>Причина блокировки</Label>
-                  <Input
-                    value={editForm.blockReason ?? ""}
-                    onChange={(e) => setEditForm((f) => ({ ...f, blockReason: e.target.value || undefined }))}
-                    placeholder="Причина"
-                  />
-                </div>
-              )}
-            </div>
-            {actionMessage && <p className="text-sm text-muted-foreground">{actionMessage}</p>}
-            <div className="flex gap-2">
-              <Button onClick={onSave} disabled={saving}>{saving ? "Сохранение…" : "Сохранить"}</Button>
-            </div>
+        )}
 
-            <hr />
-            <div>
-              <h3 className="font-semibold mb-2 flex items-center gap-2">
-                <KeyRound className="h-4 w-4" />
-                Пароль для входа в кабинет
-              </h3>
-              <p className="text-sm text-muted-foreground mb-2">
-                Установить или сменить пароль клиента. Вход по паролю возможен только при указанном email (сохраните профиль с email выше).
-              </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>Новый пароль (не менее 8 символов)</Label>
-                  <Input
-                    type="password"
-                    value={passwordForm.newPassword}
-                    onChange={(e) => setPasswordForm((f) => ({ ...f, newPassword: e.target.value }))}
-                    placeholder="••••••••"
-                    autoComplete="new-password"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Повторите пароль</Label>
-                  <Input
-                    type="password"
-                    value={passwordForm.confirm}
-                    onChange={(e) => setPasswordForm((f) => ({ ...f, confirm: e.target.value }))}
-                    placeholder="••••••••"
-                    autoComplete="new-password"
-                  />
-                </div>
-              </div>
-              {passwordMessage && (
-                <p className={`text-sm mt-2 ${passwordMessage === "Пароль установлен" ? "text-green-600" : "text-destructive"}`}>
-                  {passwordMessage}
-                </p>
+        <div className="px-6 pt-4 pb-6 relative z-10">
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList className="w-full flex flex-wrap bg-foreground/[0.04] dark:bg-white/[0.04] border border-white/5 rounded-xl p-1">
+              <TabsTrigger value="profile" className="gap-1.5 text-xs rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all">
+                <User className="h-3.5 w-3.5" /> {t("admin.clients.info")}
+              </TabsTrigger>
+              {/* после унификации Client.remnawaveUuid может быть null,
+                  но у клиента есть Subscription[0].remnawaveUuid. Показываем вкладки если ЕСТЬ
+                  хоть одна подписка с remnawaveUuid (включая primary). */}
+              {/* вкладка «Подписки» заменила «Remna».
+                  Данные Remna / Лимиты / Сквады / Быстрые действия теперь per-subscription.
+                  Вкладка «Действия» оставлена для МАССОВЫХ операций (применяются ко ВСЕМ подпискам). */}
+              {/* показываем вкладки и если у клиента есть подписки БЕЗ
+                  remna (например, migrate_inactive не создаёт Remna user — он добавляется при
+                  первой покупке). Иначе кнопка «Открыть детально» в инлайн-блоке switch'ала
+                  на несуществующий tab. */}
+              {(editing.remnawaveUuid || secondarySubs.length > 0) && (
+                <>
+                  <TabsTrigger value="subscriptions" className="gap-1.5 text-xs rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all">
+                    <Package className="h-3.5 w-3.5" /> Подписки
+                  </TabsTrigger>
+                  <TabsTrigger value="devices" className="gap-1.5 text-xs rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all">
+                    <Smartphone className="h-3.5 w-3.5" /> {t("admin.clients.devices")}
+                    {devicesTotal > 0 && <span className="ml-1 rounded-full bg-primary/10 px-1.5 text-[10px] font-bold text-primary">{devicesTotal}</span>}
+                  </TabsTrigger>
+                  <TabsTrigger value="actions" className="gap-1.5 text-xs rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all">
+                    <Activity className="h-3.5 w-3.5" /> {t("admin.clients.actions")}
+                  </TabsTrigger>
+                </>
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-2"
-                onClick={onSetPassword}
-                disabled={savingPassword || !passwordForm.newPassword || passwordForm.newPassword.length < 8}
-              >
-                {savingPassword ? "Сохранение…" : "Установить / сменить пароль"}
-              </Button>
-            </div>
+            </TabsList>
 
-            {editing.remnawaveUuid && (
-              <>
-                <hr />
-                <div>
-                  <h3 className="font-semibold mb-2">Remna (лимиты, сквад, тариф)</h3>
-                  <div className="grid gap-4 sm:grid-cols-2 text-sm">
-                    <div className="space-y-2">
-                      <Label>Лимит трафика (ГБ), 0 = без лимита</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        step={0.1}
-                        value={
-                          editForm.trafficLimitBytes !== undefined && editForm.trafficLimitBytes > 0
-                            ? (editForm.trafficLimitBytes / (1024 ** 3)).toFixed(2).replace(/\.?0+$/, "")
-                            : editForm.trafficLimitBytes === 0
-                              ? "0"
-                              : ""
-                        }
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setEditForm((f) => ({
-                            ...f,
-                            trafficLimitBytes:
-                              v === ""
-                                ? undefined
-                                : (() => {
-                                    const gb = parseFloat(v);
-                                    return Number.isNaN(gb) ? undefined : Math.round(gb * 1024 ** 3);
-                                  })(),
-                          }));
-                        }}
-                        placeholder="0"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Лимит устройств (HWID)</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={editForm.hwidDeviceLimit ?? ""}
-                        onChange={(e) =>
-                          setEditForm((f) => ({
-                            ...f,
-                            hwidDeviceLimit: e.target.value === "" ? undefined : Number(e.target.value),
-                          }))
-                        }
-                        placeholder="—"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Сброс трафика</Label>
-                      <Select
-                        value={editForm.trafficLimitStrategy ?? ""}
-                        onChange={(v) => setEditForm((f) => ({ ...f, trafficLimitStrategy: v as UpdateClientRemnaPayload["trafficLimitStrategy"] }))}
-                        options={[
-                          { value: "", label: "—" },
-                          { value: "NO_RESET", label: "Без сброса" },
-                          { value: "DAY", label: "День" },
-                          { value: "WEEK", label: "Неделя" },
-                          { value: "MONTH", label: "Месяц" },
-                        ]}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Дата окончания (ISO)</Label>
-                      <Input
-                        type="datetime-local"
-                        value={editForm.expireAt ? editForm.expireAt.slice(0, 16) : ""}
-                        onChange={(e) =>
-                          setEditForm((f) => ({
-                            ...f,
-                            expireAt: e.target.value ? new Date(e.target.value).toISOString() : undefined,
-                          }))
-                        }
-                      />
-                    </div>
+            {/* ────── Профиль ────── */}
+            <TabsContent value="profile">
+              <div className="space-y-5">
+                <div className="rounded-[1.5rem] bg-gradient-to-br from-primary/10 to-purple-500/10 border border-primary/20 p-5 space-y-3 text-sm">
+                  <div className="flex items-center gap-2 font-semibold text-sm">
+                    <Gift className="h-4 w-4 text-primary" />
+                    {t("admin.clients.grant_tariff_title", "Выдать тариф")}
                   </div>
-                  <Button variant="outline" size="sm" className="mt-2" onClick={onSaveRemnaLimits} disabled={saving}>
-                    Применить лимиты в Remna
-                  </Button>
-                </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("admin.clients.grant_tariff_hint", "Активирует выбранный тариф для клиента без оплаты. Будет создана запись платежа со статусом PAID и суммой 0. Реферальные бонусы не начисляются.")}
+                  </p>
 
-                <div className="flex flex-wrap gap-2 mt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onRemnaAction("Подписка отозвана", () => api.clientRemnaRevokeSubscription(token, editing.id))}
-                  >
-                    <Ticket className="h-4 w-4 mr-1" /> Отозвать тариф
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onRemnaAction("Отключён", () => api.clientRemnaDisable(token, editing.id))}
-                  >
-                    <Ban className="h-4 w-4 mr-1" /> Отключить в Remna
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onRemnaAction("Включён", () => api.clientRemnaEnable(token, editing.id))}
-                  >
-                    <ShieldCheck className="h-4 w-4 mr-1" /> Включить в Remna
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onRemnaAction("Трафик сброшен", () => api.clientRemnaResetTraffic(token, editing.id))}
-                  >
-                    <Wifi className="h-4 w-4 mr-1" /> Сбросить трафик
-                  </Button>
-                </div>
+                  {/* Шаг 1: выбор тарифа */}
+                  <div className="space-y-1">
+                    <Label className="text-[11px] text-muted-foreground">
+                      1. {t("admin.clients.grant_tariff_select", "Тариф")}
+                    </Label>
+                    <select
+                      className="w-full rounded-xl border border-input bg-background/70 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                      value={selectedGrantTariffId}
+                      onChange={(e) => {
+                        const newId = e.target.value;
+                        setSelectedGrantTariffId(newId);
+                        // Сбрасываем выбранную опцию — будет авто-выбрана дешёвая ниже
+                        setSelectedGrantOptionId("");
+                      }}
+                      disabled={grantLoading}
+                    >
+                      <option value="">{t("admin.clients.grant_tariff_choose", "— выберите тариф —")}</option>
+                      {tariffCategories.map((cat) => (
+                        <optgroup key={cat.id} label={cat.name}>
+                          {(cat.tariffs ?? []).map((tr) => {
+                            const opts = tr.priceOptions ?? [];
+                            const minPrice = opts.length > 0 ? Math.min(...opts.map((o) => o.price)) : tr.price;
+                            return (
+                              <option key={tr.id} value={tr.id}>
+                                {tr.name}
+                                {tr.trafficLimitBytes != null && tr.trafficLimitBytes > 0
+                                  ? ` · ${formatTrafficBytes(Number(tr.trafficLimitBytes))}`
+                                  : ""}
+                                {tr.deviceLimit ? ` · ${tr.deviceLimit} устр.` : ""}
+                                {opts.length > 1 ? ` · от ${minPrice} ${tr.currency.toUpperCase()}` : ` · ${minPrice} ${tr.currency.toUpperCase()}`}
+                              </option>
+                            );
+                          })}
+                        </optgroup>
+                      ))}
+                      {flatTariffs.length === 0 && (
+                        <option value="" disabled>
+                          {t("admin.clients.grant_tariff_empty", "Нет доступных тарифов")}
+                        </option>
+                      )}
+                    </select>
+                  </div>
 
-                {remnaData.squads.length > 0 && (
-                  <div className="mt-4">
-                    <Label>Сквады</Label>
-                    <p className="text-xs text-muted-foreground mb-2">Отмечено, в каких сквадах состоит клиент в Remna</p>
-                    <div className="flex flex-wrap gap-2 mt-1">
-                      {remnaData.squads.map((s) => {
-                        const inSquad = clientRemnaSquads.includes(s.uuid);
-                        return (
-                          <span
-                            key={s.uuid}
-                            className={`inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-xs border ${
-                              inSquad ? "bg-primary/10 border-primary/30 text-primary" : "bg-muted border-transparent text-muted-foreground"
-                            }`}
-                          >
-                            <span className="font-medium">{s.name || s.uuid}</span>
-                            <span className="text-[10px]">{inSquad ? "в скваде" : "не в скваде"}</span>
-                            {inSquad ? (
-                              <Button variant="ghost" size="sm" className="h-6 px-1 text-destructive" onClick={() => onSquadRemove(s.uuid)} title="Убрать из сквада">
-                                − Убрать
-                              </Button>
-                            ) : (
-                              <Button variant="ghost" size="sm" className="h-6 px-1" onClick={() => onSquadAdd(s.uuid)} title="Добавить в сквад">
-                                + Добавить
-                              </Button>
-                            )}
+                  {/* Шаг 2: chips с опциями длительности (если несколько) */}
+                  {(() => {
+                    const selectedTariff = flatTariffs.find((tr) => tr.id === selectedGrantTariffId);
+                    const opts = selectedTariff?.priceOptions ?? [];
+                    if (!selectedTariff || opts.length === 0) return null;
+                    const sorted = [...opts].sort((a, b) => a.sortOrder - b.sortOrder || a.durationDays - b.durationDays);
+                    const minPpd = Math.min(...opts.map((o) => o.price / Math.max(1, o.durationDays)));
+                    const effectiveOptId = selectedGrantOptionId || sorted[0].id;
+                    return (
+                      <div className="space-y-1.5">
+                        <Label className="text-[11px] text-muted-foreground">
+                          2. Длительность <span className="text-muted-foreground/60">— клиент получит выбранную опцию</span>
+                        </Label>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {sorted.map((opt) => {
+                            const ppd = opt.price / Math.max(1, opt.durationDays);
+                            const isBest = opts.length > 1 && Math.abs(ppd - minPpd) < 0.0001;
+                            const isSelected = effectiveOptId === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                disabled={grantLoading}
+                                onClick={() => setSelectedGrantOptionId(opt.id)}
+                                className={cn(
+                                  "relative rounded-xl border p-3 text-left transition-all hover:scale-[1.02]",
+                                  isSelected
+                                    ? "bg-primary/15 border-primary shadow-md ring-1 ring-primary/30"
+                                    : "bg-background/40 border-white/10 hover:border-white/20",
+                                  grantLoading && "opacity-50 cursor-not-allowed"
+                                )}
+                              >
+                                {isBest && (
+                                  <span className="absolute -top-1.5 -right-1.5 inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 px-1.5 py-0.5 text-[9px] font-bold backdrop-blur-md">
+                                    <Check className="h-2.5 w-2.5" />
+                                    Best
+                                  </span>
+                                )}
+                                <div className="font-bold text-sm tabular-nums">{opt.durationDays} дн.</div>
+                                <div className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                                  {opt.price} {selectedTariff.currency.toUpperCase()}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground/80 tabular-nums mt-0.5">
+                                  ≈ {ppd.toFixed(2)} {selectedTariff.currency.toUpperCase()}/день
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 3. Лимит трафика — ТОЛЬКО для НЕ-безлимитных тарифов.
+                      Если у тарифа trafficLimitBytes == 0 / null → блок скрыт (нечего переопределять).
+                      Пустое поле → используется лимит тарифа. */}
+                  {(() => {
+                    const selectedTariff = flatTariffs.find((tr) => tr.id === selectedGrantTariffId);
+                    const tariffLimitBytes = selectedTariff?.trafficLimitBytes != null ? Number(selectedTariff.trafficLimitBytes) : 0;
+                    const tariffIsUnlimited = !selectedTariff || tariffLimitBytes <= 0;
+                    if (tariffIsUnlimited) return null;
+                    const defaultGb = (tariffLimitBytes / 1024 ** 3).toFixed(0);
+                    return (
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-muted-foreground">
+                          3. {t("admin.clients.grant_tariff_traffic", "Лимит трафика (GB)")} —{" "}
+                          <span className="text-foreground/70">
+                            {t("admin.clients.grant_tariff_traffic_hint", { defaultValue: "по умолчанию {{gb}} GB; 0 = безлимит", gb: defaultGb })}
                           </span>
+                        </Label>
+                        <Input
+                          type="number"
+                          inputMode="decimal"
+                          min={0}
+                          step={0.1}
+                          value={grantTrafficGb}
+                          onChange={(e) => setGrantTrafficGb(e.target.value)}
+                          placeholder={defaultGb}
+                          disabled={grantLoading}
+                          className="rounded-xl"
+                        />
+                      </div>
+                    );
+                  })()}
+
+                  {/* override длительности подписки в днях.
+                      Подсказка показывает дефолт из выбранной опции / тарифа. Пусто → дефолт. */}
+                  {(() => {
+                    const selectedTariff = flatTariffs.find((tr) => tr.id === selectedGrantTariffId);
+                    if (!selectedTariff) return null;
+                    const selectedOpt = selectedTariff.priceOptions?.find((o) => o.id === selectedGrantOptionId);
+                    const defaultDays = selectedOpt?.durationDays ?? selectedTariff.durationDays ?? 30;
+                    return (
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-muted-foreground">
+                          {t("admin.clients.grant_tariff_days", "Длительность (дней)")} —{" "}
+                          <span className="text-foreground/70">
+                            {t("admin.clients.grant_tariff_days_hint", {
+                              defaultValue: "по умолчанию {{days}} дн.; перебивает опцию",
+                              days: defaultDays,
+                            })}
+                          </span>
+                        </Label>
+                        <Input
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          max={3650}
+                          step={1}
+                          value={grantCustomDays}
+                          onChange={(e) => setGrantCustomDays(e.target.value)}
+                          placeholder={String(defaultDays)}
+                          disabled={grantLoading}
+                          className="rounded-xl"
+                        />
+                      </div>
+                    );
+                  })()}
+
+                  <div className="space-y-1">
+                    <Label className="text-[11px] text-muted-foreground">{t("admin.clients.grant_tariff_note", "Комментарий (необязательно)")}</Label>
+                    <Input
+                      value={grantNote}
+                      onChange={(e) => setGrantNote(e.target.value)}
+                      placeholder={t("admin.clients.grant_tariff_note_ph", "Например: компенсация за простой")}
+                      disabled={grantLoading}
+                      className="rounded-xl"
+                      maxLength={500}
+                    />
+                  </div>
+
+                  <Button
+                    type="button"
+                    onClick={handleGrantTariff}
+                    disabled={!selectedGrantTariffId || grantLoading}
+                    className="gap-1.5 rounded-xl w-full sm:w-auto"
+                  >
+                    {grantLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Package className="h-4 w-4" />}
+                    {t("admin.clients.grant_tariff_button", "Выдать")}
+                  </Button>
+
+                  {grantMessage && (
+                    <div
+                      className={cn(
+                        "text-xs rounded-lg px-3 py-2 border",
+                        grantMessage.type === "ok"
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                          : "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20"
+                      )}
+                    >
+                      {grantMessage.text}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-[1.5rem] bg-gradient-to-br from-background/80 to-background/40 border border-white/10 p-5 space-y-3 text-sm hover:bg-white/5 transition-colors">
+                  <div className="font-medium text-xs uppercase tracking-wider text-muted-foreground mb-2">{t("admin.clients.info")}</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1.5">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Email</span>
+                      <span>{editing.email || "—"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Telegram</span>
+                      <span>{editing.telegramUsername ? `@${editing.telegramUsername}` : "—"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">{t("admin.clients.telegram_id")}</span>
+                      <span className="flex items-center gap-1">
+                        {editing.telegramId ?? "—"}
+                        {editing.telegramId && <CopyButton text={String(editing.telegramId)} />}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">{t("admin.clients.panel_id")}</span>
+                      <span className="flex items-center gap-1">
+                        <code className="text-xs">{editing.id.slice(0, 12)}…</code>
+                        <CopyButton text={editing.id} />
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">{t("admin.clients.ref_code")}</span>
+                      <span className="flex items-center gap-1">
+                        {editing.referralCode ? <code className="text-xs">{editing.referralCode}</code> : "—"}
+                        {editing.referralCode && <CopyButton text={editing.referralCode} />}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">{t("admin.clients.referrals")}</span>
+                      <span>{editing._count?.referrals ?? 0}</span>
+                    </div>
+                    {/* привязка реферера прямо в карточке клиента. */}
+                    <div className="sm:col-span-2 mt-1 p-3 rounded-xl border border-white/10 bg-card/40 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">Реферер (кто привёл)</span>
+                        {referrerInfo ? (
+                          <span className="flex items-center gap-1.5 text-xs">
+                            <span className="text-foreground font-medium">
+                              {referrerInfo.telegramUsername ? `@${referrerInfo.telegramUsername}` : referrerInfo.email || referrerInfo.id.slice(0, 8)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={detachReferrer}
+                              disabled={referrerSaving}
+                              className="text-red-500 hover:text-red-400 text-[11px] underline disabled:opacity-50"
+                            >
+                              отвязать
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">не привязан</span>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <select
+                          value={referrerLookupBy}
+                          onChange={(e) => setReferrerLookupBy(e.target.value as typeof referrerLookupBy)}
+                          className="h-9 rounded-lg border border-input bg-background px-2 text-xs shrink-0"
+                          disabled={referrerSaving}
+                        >
+                          <option value="referralCode">Реф. код</option>
+                          <option value="username">@username</option>
+                          <option value="tgid">TG ID</option>
+                          <option value="id">ID клиента</option>
+                        </select>
+                        <Input
+                          value={referrerInput}
+                          onChange={(e) => setReferrerInput(e.target.value)}
+                          placeholder={referrerLookupBy === "referralCode" ? "Реф. код реферера" : referrerLookupBy === "username" ? "@username" : referrerLookupBy === "tgid" ? "Telegram ID" : "ID клиента"}
+                          className="h-9 text-xs"
+                          onKeyDown={(e) => { if (e.key === "Enter") attachReferrer(); }}
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-9 shrink-0 rounded-lg"
+                          onClick={attachReferrer}
+                          disabled={referrerSaving || !referrerInput.trim()}
+                        >
+                          {referrerSaving ? "…" : "Привязать"}
+                        </Button>
+                      </div>
+                      {referrerMessage && <p className="text-[11px] text-muted-foreground">{referrerMessage}</p>}
+                    </div>
+                    {remnaUser?.subscriptionUrl && (
+                      <div className="flex justify-between sm:col-span-2">
+                        <span className="text-muted-foreground flex items-center gap-1"><Link className="h-3 w-3" /> {t("admin.clients.subscription")}</span>
+                        <span className="flex items-center gap-1 max-w-[60%]">
+                          <code className="text-xs truncate">{remnaUser.subscriptionUrl}</code>
+                          <CopyButton text={remnaUser.subscriptionUrl} />
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-[1.5rem] bg-gradient-to-br from-background/80 to-background/40 border border-white/10 p-5 space-y-3 text-sm hover:bg-white/5 transition-colors">
+                  <div className="font-medium text-xs uppercase tracking-wider text-muted-foreground mb-2">
+                    Подписки клиента
+                  </div>
+                  {secondarySubsLoading ? (
+                    <div className="text-sm text-muted-foreground">{t("admin.clients.loading_short")}</div>
+                  ) : secondarySubs.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">У клиента ещё нет подписок</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {secondarySubs.map((s) => {
+                        const status =
+                          s.giftStatus === "GIFT_RESERVED"
+                            ? "Код создан"
+                            : s.giftStatus === "GIFTED"
+                              ? "Подарена"
+                              : "Активна";
+                        // relation теперь из ownerId/giftedToClientId
+                        // (endpoint /admin/clients/:id/subscriptions включает обе ветки).
+                        const relation = s.ownerId === editing.id ? "Владелец" : "Получатель";
+                        // помечаем подарочные подписки (purchasedAsGift=true)
+                        // в админке отдельным бейджем — чтобы админ сразу видел что это подарок, а не обычная подписка.
+                        const isGiftPurchase = s.purchasedAsGift === true;
+                        return (
+                          <div key={s.id} className={cn(
+                            "flex items-center justify-between rounded-xl border px-4 py-3 gap-3 transition-colors",
+                            isGiftPurchase
+                              ? "border-pink-500/30 bg-pink-500/[0.04] hover:bg-pink-500/[0.08]"
+                              : "border-white/10 bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08]"
+                          )}>
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium flex items-center gap-1.5 flex-wrap">
+                                <span>
+                                  {s.isPrimary ? "Главная" : `#${s.subscriptionIndex}`} · {s.tariffName ?? "Тариф не указан"}
+                                </span>
+                                {isGiftPurchase && (
+                                  <span className="inline-flex items-center gap-1 rounded-md bg-pink-500/15 text-pink-400 border border-pink-500/30 px-1.5 py-0.5 text-[10px] font-semibold">
+                                    <Gift className="h-2.5 w-2.5" /> Подарочная
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-muted-foreground">
+                                {relation} · {status}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {s.remnawaveUuid && (
+                                <span className="text-[10px] text-muted-foreground truncate max-w-[140px]" title={s.remnawaveUuid}>
+                                  {s.remnawaveUuid}
+                                </span>
+                              )}
+                              {/* раньше эта кнопка вела на
+                                  /admin/secondary-subscriptions?search=<sub.id>, но та страница
+                                  (legacy «secondary subs» admin) для unify-схемы возвращала 0
+                                  результатов и не имела управления root-подпиской. Теперь
+                                  переключаем на вкладку «Подписки» в этом же диалоге — там
+                                  per-subscription панель: лимиты, сквады, продление, удаление. */}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setTab("subscriptions")}
+                              >
+                                Открыть детально
+                              </Button>
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
+                  )}
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Email</Label>
+                    <Input
+                      value={editForm.email ?? ""}
+                      onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value || undefined }))}
+                      placeholder="email@example.com"
+                    />
                   </div>
-                )}
-              </>
+                  <div className="space-y-2">
+                    <Label>{t("admin.clients.language")}</Label>
+                    <Select
+                      value={editForm.preferredLang ?? ""}
+                      onChange={(v) => setEditForm((f) => ({ ...f, preferredLang: v }))}
+                      options={(() => {
+                        const langs = activeLanguages.length ? activeLanguages.map((l) => l.trim()) : ["ru", "en"];
+                        const current = (editForm.preferredLang ?? editing.preferredLang ?? "").trim();
+                        const set = new Set(langs);
+                        if (current && !set.has(current)) set.add(current);
+                        return [...set].map((l) => ({ value: l, label: l }));
+                      })()}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("admin.clients.currency")}</Label>
+                    <Select
+                      value={editForm.preferredCurrency ?? ""}
+                      onChange={(v) => setEditForm((f) => ({ ...f, preferredCurrency: v }))}
+                      options={(() => {
+                        const currs = activeCurrencies.length ? activeCurrencies.map((c) => c.trim()) : ["usd", "rub"];
+                        const current = (editForm.preferredCurrency ?? editing.preferredCurrency ?? "").trim();
+                        const set = new Set(currs);
+                        if (current && !set.has(current)) set.add(current);
+                        return [...set].map((c) => ({ value: c, label: c.toUpperCase() }));
+                      })()}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("admin.clients.balance")}</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={editForm.balance ?? 0}
+                      onChange={(e) => setEditForm((f) => ({ ...f, balance: Number(e.target.value) || 0 }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("admin.clients.referral_percent")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={editForm.referralPercent ?? ""}
+                      onChange={(e) =>
+                        setEditForm((f) => ({
+                          ...f,
+                          referralPercent: e.target.value === "" ? undefined : Number(e.target.value),
+                        }))
+                      }
+                      placeholder={t("admin.clients.referral_default")}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="flex items-center gap-2">
+                      {t("admin.clients.personal_discount")}
+                      <span className="text-[11px] font-normal text-muted-foreground">
+                        {t("admin.clients.personal_discount_hint")}
+                      </span>
+                    </Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step="0.1"
+                      value={editForm.personalDiscountPercent ?? ""}
+                      onChange={(e) =>
+                        setEditForm((f) => ({
+                          ...f,
+                          personalDiscountPercent: e.target.value === "" ? undefined : Number(e.target.value),
+                        }))
+                      }
+                      placeholder={t("admin.clients.personal_discount_placeholder")}
+                    />
+                    {/* чекбокс одноразовости. */}
+                    <label className="flex items-start gap-2 cursor-pointer text-xs text-muted-foreground pt-1">
+                      <input
+                        type="checkbox"
+                        checked={editForm.personalDiscountIsOneTime ?? false}
+                        onChange={(e) =>
+                          setEditForm((f) => ({ ...f, personalDiscountIsOneTime: e.target.checked }))
+                        }
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-white/20 bg-background/60 accent-primary"
+                      />
+                      <span>
+                        🎁 Одноразовая — сгорит после первой продуктовой покупки
+                        {editing.personalDiscountIsOneTime ? <span className="ml-1 text-amber-400">(сейчас активна)</span> : null}
+                      </span>
+                    </label>
+                  </div>
+                  <div className="space-y-2 flex items-end gap-2">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={editForm.isBlocked ?? false}
+                        onChange={(e) => setEditForm((f) => ({ ...f, isBlocked: e.target.checked }))}
+                      />
+                      <span>{t("admin.clients.is_blocked")}</span>
+                    </label>
+                  </div>
+                  {(editForm.isBlocked ?? editing.isBlocked) && (
+                    <div className="space-y-2 sm:col-span-2">
+                      <Label>{t("admin.clients.block_reason")}</Label>
+                      <Input
+                        value={editForm.blockReason ?? ""}
+                        onChange={(e) => setEditForm((f) => ({ ...f, blockReason: e.target.value || undefined }))}
+                        placeholder="Причина"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {actionMessage && <p className="text-sm text-muted-foreground">{actionMessage}</p>}
+                <Button 
+                  onClick={onSave} 
+                  disabled={saving} 
+                  className="rounded-xl bg-primary hover:bg-primary/90 shadow-md shadow-primary/20 border border-primary/30 transition-all"
+                >
+                  {saving ? t("admin.clients.saving") : t("admin.clients.save_profile")}
+                </Button>
+
+                <hr />
+                <div>
+                  <h3 className="font-semibold mb-2 flex items-center gap-2 text-sm">
+                    <KeyRound className="h-4 w-4" /> {t("admin.clients.cabinet_password")}
+                  </h3>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Input
+                      type="password"
+                      value={passwordForm.newPassword}
+                      onChange={(e) => setPasswordForm((f) => ({ ...f, newPassword: e.target.value }))}
+                      placeholder={t("admin.clients.new_password")}
+                      autoComplete="new-password"
+                    />
+                    <Input
+                      type="password"
+                      value={passwordForm.confirm}
+                      onChange={(e) => setPasswordForm((f) => ({ ...f, confirm: e.target.value }))}
+                      placeholder={t("admin.clients.repeat_password")}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  {passwordMessage && (
+                    <p className={cn("text-sm mt-2", passwordMessage === t("admin.clients.password_set") ? "text-green-600" : "text-destructive")}>
+                      {passwordMessage}
+                    </p>
+                  )}
+                  <Button
+                    variant="outline" size="sm" className="mt-2 rounded-xl border-white/10 bg-foreground/[0.03] dark:bg-white/[0.03] hover:bg-foreground/[0.06] dark:hover:bg-white/[0.08] shadow-sm transition-all"
+                    onClick={onSetPassword}
+                    disabled={savingPassword || !passwordForm.newPassword || passwordForm.newPassword.length < 8}
+                  >
+                    {savingPassword ? t("admin.clients.saving") : t("admin.clients.set_password")}
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
+
+            {/* ────── Подписки (T-subscription-remna, 14.05.2026) ──────
+                Заменили старую вкладку «Remna» (client-scoped). Теперь для каждой
+                подписки клиента (primary + secondary) свой блок с собственными
+                Данными Remna, Лимитами, Сквадами и Быстрыми действиями. */}
+            {(editing.remnawaveUuid || secondarySubs.some((s) => s.remnawaveUuid)) && (
+              <TabsContent value="subscriptions">
+                <div className="space-y-4">
+                  <ClientSubsOverviewBlock clientId={editing.id} token={token} />
+                  <ClientSubscriptionsTab
+                    clientId={editing.id}
+                    token={token}
+                    onChanged={() => {
+                      loadDevices();
+                      loadUsage();
+                      loadSecondarySubs();
+                    }}
+                  />
+                </div>
+              </TabsContent>
             )}
-          </CardContent>
+
+            {/* ────── Устройства (T-tabs-rework, 13.05.2026): со ВСЕХ подписок ────── */}
+            {(editing.remnawaveUuid || secondarySubs.some((s) => s.remnawaveUuid)) && (
+              <TabsContent value="devices">
+                <ClientAllDevicesTab clientId={editing.id} token={token} />
+              </TabsContent>
+            )}
+
+            {/* ────── Действия ────── */}
+            {(editing.remnawaveUuid || secondarySubs.some((s) => s.remnawaveUuid)) && (
+              <TabsContent value="actions">
+                <div className="space-y-5">
+                  {/* массовые операции — здесь, не сверху диалога. */}
+                  <ClientBulkActionsPanel
+                    client={editing}
+                    token={token}
+                    onChanged={() => {
+                      loadRemnaUser();
+                      loadDevices();
+                      loadUsage();
+                      loadSecondarySubs();
+                    }}
+                  />
+
+                  {/* Per-subscription quick actions (Отозвать/Disable/Enable/Reset/Unlink)
+                      переехали во вкладку «Подписки» — там для каждой подписки свой набор.
+                      Здесь оставлены ТОЛЬКО массовые операции — они в ClientBulkActionsPanel выше. */}
+                  {actionMessage && <p className="text-sm text-muted-foreground mt-2">{actionMessage}</p>}
+
+                  {usageData && usageData.sparklineData && usageData.sparklineData.some((v) => v > 0) && (
+                    <div className="mt-4">
+                      <h3 className="font-semibold text-sm mb-3">{t("admin.clients.traffic_30d_chart")}</h3>
+                      <div className="flex items-end gap-px h-24 rounded-[1.5rem] bg-gradient-to-br from-white/5 to-transparent border border-white/10 p-3 overflow-hidden">
+                        {(() => {
+                          const data = usageData.sparklineData;
+                          const max = Math.max(...data, 1);
+                          return data.map((v, i) => (
+                            <div
+                              key={i}
+                              className="flex-1 bg-primary/60 hover:bg-primary rounded-t transition-colors min-w-[2px]"
+                              style={{ height: `${Math.max((v / max) * 100, v > 0 ? 4 : 1)}%` }}
+                              title={`${usageData.categories?.[i] ?? ""}: ${formatTrafficBytes(v)}`}
+                            />
+                          ));
+                        })()}
+                      </div>
+                      <div className="flex justify-between text-[10px] text-muted-foreground mt-1 px-1">
+                        <span>{usageData.categories?.[0] ?? ""}</span>
+                        <span>{usageData.categories?.[usageData.categories.length - 1] ?? ""}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+            )}
+          </Tabs>
         </div>
-      </Card>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -733,7 +1669,7 @@ function Select({
 }) {
   return (
     <select
-      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+      className="flex h-9 w-full rounded-xl border border-white/10 bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-black/30 transition-colors px-3 py-1 text-sm shadow-sm"
       value={value}
       onChange={(e) => onChange(e.target.value)}
     >
@@ -741,5 +1677,486 @@ function Select({
         <option key={o.value} value={o.value}>{o.label}</option>
       ))}
     </select>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Плашка массовых операций над клиентом.
+// Живёт в шапке диалога клиента. Делает: disable/enable, sync push/pull,
+// reset-traffic-all, revoke-all, wipe-subscriptions, audit.
+// ─────────────────────────────────────────────────────────────────────────────
+function ClientBulkActionsPanel({
+  client,
+  token,
+  onChanged,
+}: {
+  client: ClientRecord;
+  token: string;
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [lastReport, setLastReport] = useState<{ title: string; report: import("@/lib/api").BulkOpReport | null; audit?: import("@/lib/api").ClientAuditResult } | null>(null);
+  const [auditOpen, setAuditOpen] = useState(false);
+
+  // Универсальный wrapper для запуска bulk-операции с UI loading + отчёт.
+  const run = useCallback(async (
+    key: string,
+    title: string,
+    fn: () => Promise<import("@/lib/api").BulkOpReport | import("@/lib/api").BulkOpReportFull>,
+    options?: { confirm?: string },
+  ) => {
+    if (options?.confirm && !window.confirm(options.confirm)) return;
+    setBusy(key);
+    try {
+      const r = await fn();
+      setLastReport({ title, report: r });
+      onChanged();
+    } catch (e) {
+      setLastReport({ title, report: { ok: 0, skipped: 0, failed: 1, items: [{ subscriptionId: "", subscriptionIndex: -1, remnawaveUuid: null, status: "error", message: e instanceof Error ? e.message : String(e) }] } });
+    } finally {
+      setBusy(null);
+    }
+  }, [onChanged]);
+
+  const runAudit = useCallback(async () => {
+    setBusy("audit");
+    try {
+      const r = await api.clientAudit(token, client.id);
+      setLastReport({ title: t("admin.clients.bulk_audit", "Аудит БД vs Remnawave"), report: null, audit: r });
+      setAuditOpen(true);
+    } finally {
+      setBusy(null);
+    }
+  }, [token, client.id, t]);
+
+  const isBlocked = client.isBlocked;
+
+  return (
+    <div className="rounded-[1.5rem] border border-white/10 bg-foreground/[0.03] dark:bg-white/[0.03] p-4 mb-4 space-y-3">
+      {/* Шапка: статус + основные кнопки */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          {isBlocked ? (
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 border border-red-500/30 px-2.5 py-1 text-xs text-red-400 font-medium">
+              <Ban className="h-3 w-3" /> {t("admin.clients.client_disabled", "Клиент отключён")}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/30 px-2.5 py-1 text-xs text-green-500 dark:text-green-400 font-medium">
+              <ShieldCheck className="h-3 w-3" /> {t("admin.clients.client_active", "Клиент активен")}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground">
+            {t("admin.clients.bulk_panel_hint", "Массовые операции применяются ко всем подпискам клиента")}
+          </span>
+        </div>
+        <div className="ml-auto flex flex-wrap gap-2">
+          {isBlocked ? (
+            <Button
+              variant="outline" size="sm"
+              className="gap-1.5 rounded-xl text-green-700 dark:text-green-400 border-green-500/30 hover:bg-green-500/10"
+              disabled={busy != null}
+              onClick={() => run("enable", t("admin.clients.bulk_enable_client", "Включение клиента"),
+                () => api.clientBulkEnable(token, client.id))}
+            >
+              {busy === "enable" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+              {t("admin.clients.bulk_enable_client_btn", "Включить клиента")}
+            </Button>
+          ) : (
+            <Button
+              variant="outline" size="sm"
+              className="gap-1.5 rounded-xl text-destructive border-destructive/30 hover:bg-destructive/10"
+              disabled={busy != null}
+              onClick={() => run("disable", t("admin.clients.bulk_disable_client", "Отключение клиента"),
+                () => api.clientBulkDisable(token, client.id),
+                { confirm: t("admin.clients.bulk_disable_confirm", "Отключить клиента?\nЭто заблокирует его в боте, отключит VPN на ВСЕХ его подписках, и снимет авто-продление.") })}
+            >
+              {busy === "disable" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
+              {t("admin.clients.bulk_disable_client_btn", "Отключить клиента")}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Группы массовых операций */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5 text-[11px]">
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("syncPush", t("admin.clients.bulk_sync_push", "Push БД → Remna"),
+            () => api.clientBulkSyncPush(token, client.id))}>
+          <RotateCw className="h-3 w-3" /> {t("admin.clients.bulk_sync_push_btn", "Push в Remna")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("syncPull", t("admin.clients.bulk_sync_pull", "Pull Remna → БД"),
+            () => api.clientBulkSyncPull(token, client.id))}>
+          <RefreshCw className="h-3 w-3" /> {t("admin.clients.bulk_sync_pull_btn", "Pull из Remna")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("resetAll", t("admin.clients.bulk_reset_traffic", "Сброс трафика"),
+            () => api.clientBulkResetAllTraffic(token, client.id),
+            { confirm: t("admin.clients.bulk_reset_traffic_confirm", "Сбросить трафик у всех подписок клиента?") })}>
+          <Wifi className="h-3 w-3" /> {t("admin.clients.bulk_reset_all_btn", "Сбросить трафик")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("revokeAll", t("admin.clients.bulk_revoke", "Revoke URL"),
+            () => api.clientBulkRevokeAll(token, client.id),
+            { confirm: t("admin.clients.bulk_revoke_confirm", "Перевыпустить subscription URL у всех подписок? Старые ссылки перестанут работать.") })}>
+          <Ticket className="h-3 w-3" /> {t("admin.clients.bulk_revoke_btn", "Перевыпустить URL")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("disableAll", t("admin.clients.bulk_disable_all", "Disable Remna"),
+            () => api.clientBulkDisableAll(token, client.id))}>
+          <Ban className="h-3 w-3" /> {t("admin.clients.bulk_disable_all_btn", "Disable все в Remna")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={() => run("enableAll", t("admin.clients.bulk_enable_all", "Enable Remna"),
+            () => api.clientBulkEnableAll(token, client.id))}>
+          <ShieldCheck className="h-3 w-3" /> {t("admin.clients.bulk_enable_all_btn", "Enable все в Remna")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start" disabled={busy != null}
+          onClick={runAudit}>
+          <Search className="h-3 w-3" /> {t("admin.clients.bulk_audit_btn", "Аудит БД↔Remna")}
+        </Button>
+        <Button variant="outline" size="sm" className="gap-1 rounded-lg justify-start text-amber-700 dark:text-amber-400 border-amber-500/30 hover:bg-amber-500/10" disabled={busy != null}
+          onClick={() => run("wipe", t("admin.clients.bulk_wipe", "Удаление подписок"),
+            () => api.clientBulkWipe(token, client.id),
+            { confirm: t("admin.clients.bulk_wipe_confirm", "⚠ Удалить ВСЕ подписки клиента из БД и Remnawave?\nКлиент останется (баланс, история).") })}>
+          <Trash2 className="h-3 w-3" /> {t("admin.clients.bulk_wipe_btn", "Удалить все подписки")}
+        </Button>
+      </div>
+
+      {/* Последний отчёт */}
+      {lastReport && lastReport.report && (
+        <div className="rounded-xl border border-white/10 bg-foreground/[0.04] dark:bg-white/[0.04] p-3 text-[11px] space-y-1.5">
+          <div className="flex items-center justify-between font-medium">
+            <span>{lastReport.title}</span>
+            <button onClick={() => setLastReport(null)} className="text-muted-foreground hover:text-foreground">×</button>
+          </div>
+          <div className="flex gap-3">
+            <span className="text-green-500">✓ ok: {lastReport.report.ok}</span>
+            <span className="text-muted-foreground">↷ skipped: {lastReport.report.skipped}</span>
+            <span className="text-red-400">✗ failed: {lastReport.report.failed}</span>
+          </div>
+          {lastReport.report.items.length > 0 && lastReport.report.failed > 0 && (
+            <ul className="text-[10px] text-muted-foreground space-y-0.5 max-h-20 overflow-y-auto">
+              {lastReport.report.items.filter((i) => i.status === "error").map((i, idx) => (
+                <li key={idx} className="text-red-400">
+                  #{i.subscriptionIndex}: {i.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Audit-модалка */}
+      {auditOpen && lastReport?.audit && (
+        <Dialog open={auditOpen} onOpenChange={setAuditOpen}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>{t("admin.clients.audit_title", "Аудит БД ↔ Remnawave")}</DialogTitle>
+              <DialogDescription>
+                {t("admin.clients.audit_description", { defaultValue: "Проверено: {{checked}} из {{total}} подписок. Расхождений: {{issues}}", checked: lastReport.audit.checked, total: lastReport.audit.total, issues: lastReport.audit.issues.length })}
+              </DialogDescription>
+            </DialogHeader>
+            {lastReport.audit.issues.length === 0 ? (
+              <div className="text-center py-6 text-green-500">
+                <ShieldCheck className="h-10 w-10 mx-auto mb-2" />
+                <p className="text-sm">{t("admin.clients.audit_all_clean", "Расхождений не обнаружено")}</p>
+              </div>
+            ) : (
+              <ul className="space-y-2 max-h-96 overflow-y-auto">
+                {lastReport.audit.issues.map((issue, idx) => (
+                  <li key={idx} className="rounded-xl border border-white/10 p-3 text-xs">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-semibold text-amber-400">{issue.type}</span>
+                      {issue.subscriptionIndex >= 0 && (
+                        <span className="text-muted-foreground">#{issue.subscriptionIndex}</span>
+                      )}
+                    </div>
+                    <div className="text-muted-foreground">{issue.detail}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// вкладка «Устройства» — со ВСЕХ подписок.
+// Каждое устройство показывается с бейджем подписки (#index + tariff name).
+// ─────────────────────────────────────────────────────────────────────────────
+function ClientAllDevicesTab({ clientId, token }: { clientId: string; token: string }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState<import("@/lib/api").ClientAllDevicesResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getClientAllDevices(token, clientId)
+      .then((r) => setData(r))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [token, clientId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const deleteDevice = async (subId: string, uuid: string | null, hwid: string) => {
+    if (!uuid) return;
+    if (!confirm(t("admin.clients.delete_device_confirm"))) return;
+    try {
+      // Используем эндпоинт по subId если будет в будущем; пока — через clientId (proxy на primary)
+      // если устройство с primary; иначе — через прямой Remna-uuid (надо отдельный endpoint).
+      // Для минимального решения — оставляем через clientId — работает для primary subscription.
+      await api.deleteClientRemnaDevice(token, clientId, hwid);
+      load();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t("admin.clients.delete_error"));
+    }
+    // marker: subId/uuid сейчас не используются — оставлены для будущего per-sub эндпоинта.
+    void subId; void uuid;
+  };
+
+  if (loading) {
+    return <p className="text-sm text-muted-foreground">{t("admin.clients.loading_short")}</p>;
+  }
+  if (!data || data.total === 0) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold text-sm flex items-center gap-2">
+            <Smartphone className="h-4 w-4" />
+            {t("admin.clients.hwid_devices", "HWID устройства")} (0)
+          </h3>
+          <Button variant="ghost" size="sm" onClick={load} title={t("admin.clients.refresh_data", "Обновить")}>
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="rounded-xl border border-dashed p-8 text-center text-muted-foreground">
+          <Smartphone className="h-8 w-8 mx-auto mb-2 opacity-40" />
+          <p className="text-sm">{t("admin.clients.no_registered_devices")}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold text-sm flex items-center gap-2">
+          <Smartphone className="h-4 w-4" />
+          {t("admin.clients.hwid_devices", "HWID устройства")} ({data.total})
+          <span className="text-muted-foreground font-normal text-[11px]">{t("admin.clients.from_all_subs", "со всех подписок клиента")}</span>
+        </h3>
+        <Button variant="ghost" size="sm" onClick={load} title={t("admin.clients.refresh_data", "Обновить")}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className="space-y-4">
+        {data.groups.filter((g) => g.devices.length > 0 || g.remnawaveUuid).map((g) => {
+          const isPrimary = g.subscriptionIndex === 0;
+          const subBadgeLabel = isPrimary ? t("admin.clients.sub_primary", "Главная") : `#${g.subscriptionIndex}`;
+          return (
+            <div key={g.subscriptionId} className="rounded-[1.5rem] border border-white/10 bg-foreground/[0.02] p-4 space-y-2.5">
+              {/* Заголовок группы подписки */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg px-2 py-1 font-semibold border",
+                  isPrimary
+                    ? "bg-primary/10 text-primary border-primary/30"
+                    : "bg-muted text-muted-foreground border-white/10"
+                )}>
+                  {g.tariffEmoji && <span>{g.tariffEmoji}</span>}
+                  {subBadgeLabel}
+                </span>
+                {g.tariffName && <span className="text-muted-foreground">{g.tariffName}</span>}
+                <span className="ml-auto text-muted-foreground">
+                  {g.devices.length}{g.deviceLimit != null ? ` / ${g.deviceLimit}` : ""}
+                </span>
+              </div>
+
+              {g.devices.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground text-center py-3">
+                  {t("admin.clients.no_devices_for_sub", "Нет устройств на этой подписке")}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {g.devices.map((d) => (
+                    <div key={d.id || d.hwid} className="flex items-center justify-between rounded-xl border border-white/10 bg-foreground/[0.03] dark:bg-white/[0.03] p-3 gap-3 hover:bg-foreground/[0.06] dark:hover:bg-white/[0.06] transition-colors">
+                      <div className="min-w-0 space-y-0.5 flex-1">
+                        <div className="flex items-center gap-2">
+                          <HardDrive className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <code className="text-xs truncate">{d.hwid}</code>
+                          <CopyButton text={d.hwid} />
+                        </div>
+                        <div className="text-[11px] text-muted-foreground pl-6">
+                          {d.platform && <span>{t("admin.clients.platform", "Платформа:")} {d.platform}</span>}
+                          {d.createdAt && <span> &middot; {fmtMsk(d.createdAt)}</span>}
+                        </div>
+                        {d.userAgent && (
+                          <div className="text-[10px] text-muted-foreground pl-6 truncate max-w-md" title={d.userAgent}>
+                            {d.userAgent}
+                          </div>
+                        )}
+                      </div>
+                      <Button variant="ghost" size="sm" className="text-destructive shrink-0"
+                        onClick={() => deleteDevice(g.subscriptionId, g.remnawaveUuid, d.hwid)}
+                        title={t("admin.clients.delete_device", "Удалить устройство")}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// сводка по всем подпискам клиента.
+// Показывает компактную таблицу — для каждой подписки строка с remna-метриками.
+// ─────────────────────────────────────────────────────────────────────────────
+function ClientSubsOverviewBlock({ clientId, token }: { clientId: string; token: string }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState<import("@/lib/api").ClientSubsOverviewResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getClientSubsOverview(token, clientId)
+      .then((r) => setData(r))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [token, clientId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <p className="text-sm text-muted-foreground">{t("admin.clients.loading_short", "Загрузка…")}</p>;
+  if (!data || data.items.length === 0) return null;
+
+  const totalTrafficUsed = data.items.reduce((acc, it) => acc + (it.remna?.trafficUsedBytes ?? 0), 0);
+  const totalDevices = data.items.reduce((acc, it) => acc + (it.remna?.deviceCount ?? 0), 0);
+  const activeCount = data.items.filter((it) => it.remna?.status === "ACTIVE").length;
+
+  return (
+    <div className="rounded-[1.5rem] border border-white/10 bg-gradient-to-br from-background/80 to-background/40 p-5 space-y-4">
+      {/* Шапка со сводными цифрами */}
+      <div className="flex flex-wrap items-center gap-4">
+        <h3 className="font-semibold text-sm flex items-center gap-2">
+          <Package className="h-4 w-4" />
+          {t("admin.clients.subs_overview", "Подписки клиента")} ({data.items.length})
+        </h3>
+        <div className="ml-auto flex flex-wrap gap-3 text-[11px]">
+          <span className="text-green-500">✓ ACTIVE: {activeCount}</span>
+          <span className="text-muted-foreground">📱 Devices: {totalDevices}</span>
+          <span className="text-muted-foreground">📊 Traffic: {formatTrafficBytes(totalTrafficUsed)}</span>
+          <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={load}>
+            <RefreshCw className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Таблица подписок */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-[10px] uppercase text-muted-foreground border-b border-white/10">
+            <tr>
+              <th className="text-left py-2 pr-2 font-medium">#</th>
+              <th className="text-left py-2 pr-2 font-medium">{t("admin.clients.tariff", "Тариф")}</th>
+              <th className="text-left py-2 pr-2 font-medium">{t("admin.clients.status", "Статус")}</th>
+              <th className="text-left py-2 pr-2 font-medium">{t("admin.clients.expires", "Истекает")}</th>
+              <th className="text-right py-2 pr-2 font-medium">{t("admin.clients.traffic", "Трафик")}</th>
+              <th className="text-right py-2 pr-2 font-medium">{t("admin.clients.devices", "HWID")}</th>
+              <th className="text-right py-2 font-medium">Squads</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.map((it) => {
+              const isPrimary = it.subscriptionIndex === 0;
+              const expiresSoon = it.remna?.expireAt
+                ? new Date(it.remna.expireAt).getTime() - Date.now() < 3 * 86_400_000
+                : false;
+              const isExpired = it.remna?.expireAt
+                ? new Date(it.remna.expireAt).getTime() <= Date.now()
+                : false;
+              return (
+                <tr key={it.subscriptionId} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors">
+                  <td className="py-2 pr-2">
+                    <span className={cn(
+                      "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold border",
+                      isPrimary ? "bg-primary/10 text-primary border-primary/30" : "bg-muted text-muted-foreground border-white/10"
+                    )}>
+                      {isPrimary ? t("admin.clients.sub_primary", "Главная") : `#${it.subscriptionIndex}`}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-2">
+                    <div className="flex items-center gap-1">
+                      {it.tariffEmoji && <span>{it.tariffEmoji}</span>}
+                      <span>{it.tariffName ?? (it.isTrial ? (it.trialName ?? "Trial") : "—")}</span>
+                      {it.isTrial && <span className="text-[9px] text-amber-400">trial</span>}
+                      {it.purchasedAsGift && <Gift className="h-3 w-3 text-pink-400" />}
+                      {it.autoRenewEnabled && <RotateCw className="h-3 w-3 text-blue-400" />}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-2">
+                    {it.remna ? (
+                      <span className={cn(
+                        "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] border",
+                        it.remna.status === "ACTIVE" && "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+                        it.remna.status === "DISABLED" && "bg-red-500/10 text-red-400 border-red-500/30",
+                        it.remna.status === "LIMITED" && "bg-amber-500/10 text-amber-400 border-amber-500/30",
+                        it.remna.status === "EXPIRED" && "bg-gray-500/10 text-gray-400 border-gray-500/30",
+                      )}>
+                        {it.remna.status ?? "—"}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">{t("admin.clients.no_remna", "нет Remna")}</span>
+                    )}
+                  </td>
+                  <td className={cn(
+                    "py-2 pr-2",
+                    isExpired ? "text-red-400" : expiresSoon ? "text-amber-400" : "text-muted-foreground"
+                  )}>
+                    {it.remna?.expireAt
+                      ? fmtMskDate(it.remna.expireAt)
+                      : "—"}
+                  </td>
+                  <td className="py-2 pr-2 text-right">
+                    {it.remna ? (
+                      <span>
+                        {formatTrafficBytes(it.remna.trafficUsedBytes ?? 0)}
+                        {it.remna.trafficLimitBytes && it.remna.trafficLimitBytes > 0 ? (
+                          <span className="text-muted-foreground"> / {formatTrafficBytes(it.remna.trafficLimitBytes)}</span>
+                        ) : (
+                          <span className="text-muted-foreground"> / ∞</span>
+                        )}
+                      </span>
+                    ) : "—"}
+                  </td>
+                  <td className="py-2 pr-2 text-right">
+                    {it.remna ? `${it.remna.deviceCount} / ${it.remna.hwidDeviceLimit ?? "∞"}` : "—"}
+                  </td>
+                  <td className="py-2 text-right">
+                    {it.remna?.activeSquadsCount ?? 0}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="text-[10px] text-muted-foreground italic">
+        {t("admin.clients.overview_hint", "Ниже — детали и настройки главной подписки. Управление конкретной подпиской — в карточке подписки.")}
+      </div>
+    </div>
   );
 }

@@ -16,6 +16,7 @@ import {
   remnaUsernameFromClient,
 } from "../remna/remna.client.js";
 import { getSystemConfig } from "../client/client.service.js";
+import { getPrimaryBot } from "../bot/bot.service.js";
 
 const PAGE_SIZE = 100;
 
@@ -61,6 +62,13 @@ export async function syncFromRemna(): Promise<{
   const config = await getSystemConfig();
   const defaultLang = config.defaultLanguage ?? "ru";
   const defaultCurrency = (config.defaultCurrency ?? "usd").toLowerCase();
+  // Sync from Remna создаёт «безбот'овых» клиентов (источник истины — Remna,
+  // не TG-сессия). Привязываем к primary боту для консистентности.
+  const primaryBot = await getPrimaryBot();
+  if (!primaryBot) {
+    result.errors.push("Primary bot не настроен — синхронизация невозможна");
+    return { ok: false, ...result };
+  }
 
   let page = 1;
   let hasMore = true;
@@ -100,8 +108,9 @@ export async function syncFromRemna(): Promise<{
           const existing = existingByUuid || existingByTg || existingByEmail;
 
           if (existing) {
-            const data: { remnawaveUuid: string; telegramId?: string; email?: string | null; telegramUsername?: string } = {
+            const data: { remnawaveUuid: string; telegramId?: string; email?: string | null; telegramUsername?: string; trialUsed?: boolean } = {
               remnawaveUuid: uuid,
+              trialUsed: true,
             };
             if (telegramId) {
               const otherWithTg = await prisma.client.findFirst({
@@ -132,6 +141,8 @@ export async function syncFromRemna(): Promise<{
                 referralCode: refCode,
                 preferredLang: defaultLang,
                 preferredCurrency: defaultCurrency,
+                autoRenewEnabled: config.defaultAutoRenewEnabled ?? false,
+                trialUsed: true,
               },
             });
             result.created++;
@@ -180,6 +191,15 @@ function isRemnaNotFoundError(status: number, error?: string): boolean {
   return status === 404 || (typeof error === "string" && /not found|not exist/i.test(error));
 }
 
+/** Повторить запрос к Remna один раз при сетевой ошибке («fetch failed» и подобные). */
+async function remnaGetUserWithRetry(uuid: string): Promise<Awaited<ReturnType<typeof remnaGetUser>>> {
+  const first = await remnaGetUser(uuid);
+  if (!first.error || first.status !== 500) return first;
+  // Сетевая/транзитная ошибка — даём Remna секунду и пробуем ещё раз перед тем как сбить синхру.
+  await new Promise((r) => setTimeout(r, 1000));
+  return remnaGetUser(uuid);
+}
+
 /** Синхронизация в Remna: отправляем telegramId и email наших клиентов.
  *  Текущие activeInternalSquads из GET подставляем в PATCH явно, чтобы Remna не обнулял сквады при «частичном» PATCH
  *  (иначе один запуск синхронизации мог бы сбросить сквады всем пользователям).
@@ -206,7 +226,7 @@ export async function syncToRemna(): Promise<{
     const uuid = c.remnawaveUuid;
     if (!uuid) continue;
     try {
-      const getRes = await remnaGetUser(uuid);
+      const getRes = await remnaGetUserWithRetry(uuid);
       if (getRes.error) {
         if (isRemnaNotFoundError(getRes.status, getRes.error)) {
           await prisma.client.update({ where: { id: c.id }, data: { remnawaveUuid: null } });
@@ -296,6 +316,10 @@ export async function createRemnaUsersForClientsWithoutUuid(): Promise<{
         result.linked++;
       }
       if (uuid) {
+        // НЕ ставим trialUsed=true при синхронизации!
+        // Синк только линкует Remna-юзера — это не значит что клиент брал триал.
+        // Раньше тут стоял trialUsed: true → все синканные/мигрированные получали флаг,
+        // и авто-рассылка «Пользовался триалом, но не оплатил» спамила тех кто триал не брал.
         await prisma.client.update({
           where: { id: c.id },
           data: { remnawaveUuid: uuid },

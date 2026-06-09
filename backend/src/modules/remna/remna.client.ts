@@ -7,16 +7,24 @@ import { env } from "../../config/index.js";
 
 const REMNA_API_URL = env.REMNA_API_URL?.replace(/\/$/, "") ?? "";
 const REMNA_ADMIN_TOKEN = env.REMNA_ADMIN_TOKEN ?? "";
+const REMNA_SECRET_KEY = env.REMNA_SECRET_KEY?.trim() ?? "";
 
 export function isRemnaConfigured(): boolean {
   return Boolean(REMNA_API_URL && REMNA_ADMIN_TOKEN);
 }
 
 function getHeaders(): Record<string, string> {
-  return {
+  const h: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${REMNA_ADMIN_TOKEN}`,
   };
+  if (REMNA_SECRET_KEY) {
+    const colonIdx = REMNA_SECRET_KEY.indexOf(":");
+    const cookieName = colonIdx > 0 ? REMNA_SECRET_KEY.slice(0, colonIdx) : REMNA_SECRET_KEY;
+    const cookieValue = colonIdx > 0 ? REMNA_SECRET_KEY.slice(colonIdx + 1) : REMNA_SECRET_KEY;
+    h["Cookie"] = `${cookieName}=${cookieValue}`;
+  }
+  return h;
 }
 
 export async function remnaFetch<T>(
@@ -274,4 +282,166 @@ export function remnaRemoveAllUsersFromInternalSquad(squadUuid: string) {
   return remnaFetch<unknown>(`/api/internal-squads/${squadUuid}/bulk-actions/remove-users`, {
     method: "DELETE",
   });
+}
+
+/** GET /api/bandwidth-stats/users/{uuid} — user usage by date range */
+export function remnaGetUserBandwidthStats(userUuid: string, start: string, end: string) {
+  const params = new URLSearchParams({ start, end });
+  return remnaFetch<{
+    response: {
+      categories: string[];
+      series: { name: string; data: number[] }[];
+      sparklineData: number[];
+    };
+  }>(`/api/bandwidth-stats/users/${userUuid}?${params}`);
+}
+
+/** GET /api/bandwidth-stats/nodes/{uuid}/users — top users usage on node by range */
+export function remnaGetNodeUsersUsage(nodeUuid: string, start: string, end: string, topUsersLimit = 50) {
+  const params = new URLSearchParams({
+    topUsersLimit: String(topUsersLimit),
+    start,
+    end,
+  });
+  return remnaFetch<{
+    response: {
+      categories: string[];
+      sparklineData: number[];
+      topUsers: { color: string; username: string; total: number }[];
+    };
+  }>(`/api/bandwidth-stats/nodes/${nodeUuid}/users?${params}`);
+}
+
+/** GET /api/bandwidth-stats/nodes/realtime — realtime usage per node (removed in API 2.7.2, kept for compat) */
+export function remnaGetNodesRealtimeUsage() {
+  return remnaFetch<{
+    response: {
+      nodeUuid: string;
+      nodeName: string;
+      countryCode: string;
+      downloadBytes: number;
+      uploadBytes: number;
+      totalBytes: number;
+      downloadSpeedBps: number;
+      uploadSpeedBps: number;
+      totalSpeedBps: number;
+    }[];
+  }>("/api/bandwidth-stats/nodes/realtime");
+}
+
+/** POST /api/ip-control/fetch-users-ips/{nodeUuid} — start async job to fetch user IPs on a node */
+export function remnaFetchUsersIps(nodeUuid: string) {
+  return remnaFetch<{ response: { jobId: string } }>(
+    `/api/ip-control/fetch-users-ips/${nodeUuid}`,
+    { method: "POST" },
+  );
+}
+
+/** GET /api/ip-control/fetch-users-ips/result/{jobId} — poll async job result */
+export function remnaGetFetchUsersIpsResult(jobId: string) {
+  return remnaFetch<{
+    response: {
+      isCompleted: boolean;
+      isFailed: boolean;
+      result: {
+        success: boolean;
+        nodeUuid: string;
+        users: { userId: string; ips: { ip: string; lastSeen: string }[] }[];
+      } | null;
+    };
+  }>(`/api/ip-control/fetch-users-ips/result/${jobId}`);
+}
+
+/** GET /api/system/nodes/metrics — Prometheus-style metrics per node */
+export function remnaGetNodesMetrics() {
+  return remnaFetch<{
+    response: {
+      nodes: {
+        nodeUuid: string;
+        nodeName: string;
+        countryEmoji: string;
+        providerName: string;
+        usersOnline: number;
+        inboundsStats: { tag: string; upload: string; download: string }[];
+        outboundsStats: { tag: string; upload: string; download: string }[];
+      }[];
+    };
+  }>("/api/system/nodes/metrics");
+}
+
+/** GET /api/users/{uuid} — resolve user by UUID (returns full user with username, etc.) */
+export function remnaGetUserByUuid(uuid: string) {
+  return remnaFetch<{
+    response: {
+      uuid: string;
+      username: string;
+      shortUuid: string;
+      [key: string]: unknown;
+    };
+  }>(`/api/users/${uuid}`);
+}
+
+/**
+ * POST /api/system/tools/happ/encrypt — зашифровать ссылку через Happ Crypto.
+ *
+ * Использует встроенный механизм Remnawave (тот же, что обрабатывает плейсхолдер
+ * `{{HAPP_CRYPT4_LINK}}` на встроенной sub-page Remnawave). Возвращает
+ * зашифрованную ссылку вида `happ://crypt4/...` либо null, если запрос упал
+ * (на старых Remna 1.x этого эндпоинта может не быть).
+ *
+ * Кэшируем результат в памяти на 10 минут — Remnawave при шифровании одной
+ * и той же ссылки возвращает один и тот же crypt4-токен (он детерминирован
+ * относительно секрета на стороне Remna), а наш клиент дёргает /subscription
+ * на каждый рендер кабинета. Кэш экономит сетевой round-trip.
+ */
+const _happCryptCache = new Map<string, { value: string; ts: number }>();
+const HAPP_CRYPT_TTL_MS = 10 * 60 * 1000;
+
+export async function remnaEncryptHappLink(linkToEncrypt: string): Promise<string | null> {
+  const trimmed = linkToEncrypt.trim();
+  if (!trimmed) return null;
+  // Уже crypt — возвращаем как есть
+  if (trimmed.startsWith("happ://")) return trimmed;
+
+  const cached = _happCryptCache.get(trimmed);
+  if (cached && Date.now() - cached.ts < HAPP_CRYPT_TTL_MS) {
+    return cached.value;
+  }
+
+  const result = await remnaFetch<{ response?: { encryptedLink?: string } }>(
+    "/api/system/tools/happ/encrypt",
+    {
+      method: "POST",
+      body: JSON.stringify({ linkToEncrypt: trimmed }),
+    }
+  );
+
+  if (result.error || !result.data) return null;
+  const encrypted = result.data.response?.encryptedLink;
+  if (!encrypted || !encrypted.startsWith("happ://")) return null;
+
+  _happCryptCache.set(trimmed, { value: encrypted, ts: Date.now() });
+  return encrypted;
+}
+
+/**
+ * Шифрует поле `subscriptionUrl` внутри ответа Remnawave inplace.
+ * Принимает `result.data` от `remnaGetUser()` и пытается обновить URL.
+ * При неудаче — оставляет оригинал. Безопасно: try/catch внутри.
+ */
+export async function encryptSubscriptionUrlInPlace(data: unknown): Promise<void> {
+  try {
+    if (!data || typeof data !== "object") return;
+    const obj = data as Record<string, unknown>;
+    const resp = (obj.response ?? obj) as Record<string, unknown> | undefined;
+    if (!resp || typeof resp !== "object") return;
+    const rawUrl = resp.subscriptionUrl;
+    if (typeof rawUrl !== "string" || !rawUrl.trim() || rawUrl.startsWith("happ://")) return;
+    const encrypted = await remnaEncryptHappLink(rawUrl.trim());
+    if (encrypted) {
+      resp.subscriptionUrl = encrypted;
+    }
+  } catch {
+    // не падаем — оригинальная ссылка останется
+  }
 }

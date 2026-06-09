@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium leading-none align-middle transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:self-center [&_svg]:align-middle",
   {
     variants: {
       variant: {
@@ -35,11 +35,13 @@ export interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild, ...props }, ref) => {
+  ({ className, variant, size, asChild, children, ...props }, ref) => {
     const compClassName = cn(buttonVariants({ variant, size, className }));
-    if (asChild && React.Children.count(props.children) === 1 && React.isValidElement(props.children)) {
-      return React.cloneElement(props.children as React.ReactElement<{ className?: string; ref?: React.Ref<unknown> }>, {
-        className: cn(compClassName, (props.children as React.ReactElement).props?.className),
+    if (asChild && React.Children.count(children) === 1 && React.isValidElement(children)) {
+      const child = children as React.ReactElement<{ className?: string; ref?: React.Ref<unknown> }>;
+      return React.cloneElement(child, {
+        ...props,
+        className: cn(compClassName, child.props?.className),
         ref,
       });
     }
@@ -48,7 +50,9 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         className={compClassName}
         ref={ref}
         {...props}
-      />
+      >
+        {children}
+      </button>
     );
   }
 );
