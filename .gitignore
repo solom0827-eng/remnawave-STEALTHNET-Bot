@@ -40,3 +40,4 @@ frontend/dist/
 
 # For Gemini
 output.xml
+.DS_Store
