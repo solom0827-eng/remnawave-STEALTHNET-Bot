@@ -1,7 +1,8 @@
 /**
  * API для админ-панели в Telegram-боте.
- * Авторизация: X-Telegram-Bot-Token (токен бота) + telegramId (ID админа в Telegram).
- * Доступ только для telegramId из настройки bot_admin_telegram_ids.
+ * Авторизация: X-Telegram-Bot-Token (основной токен из env BOT_TOKEN)
+ * + telegramId (ID админа в Telegram). Доступ только для telegramId из настройки
+ * bot_admin_telegram_ids.
  */
 
 import { Router, Request, Response } from "express";
@@ -64,9 +65,8 @@ function getTelegramId(req: Request): number | null {
 
 async function requireBotAdmin(req: Request, res: Response): Promise<{ telegramId: number } | null> {
   const token = getBotToken(req);
-  const config = await getSystemConfig();
-  const botToken = (config.telegramBotToken ?? "").trim();
-  if (!botToken || token !== botToken) {
+  const expected = (process.env.BOT_TOKEN ?? "").trim();
+  if (!token || !expected || token !== expected) {
     res.status(401).json({ message: "Unauthorized" });
     return null;
   }
@@ -75,6 +75,7 @@ async function requireBotAdmin(req: Request, res: Response): Promise<{ telegramI
     res.status(400).json({ message: "telegramId required (query or body)" });
     return null;
   }
+  const config = await getSystemConfig();
   const ids = config.botAdminTelegramIds ?? [];
   if (!ids.includes(String(telegramId))) {
     res.status(403).json({ message: "Forbidden" });
@@ -513,6 +514,8 @@ const broadcastBodySchema = z.object({
   message: z.string().max(4096),
   channel: z.enum(["telegram", "email", "both"]),
   photoFileId: z.string().min(1).optional(),
+  buttonText: z.string().max(256).optional(),
+  buttonUrl: z.string().max(2048).optional(),
 });
 
 /** Скачать файл из Telegram по file_id. */
@@ -536,7 +539,7 @@ botAdminRouter.post("/broadcast", async (req, res) => {
   if (!admin) return;
   const body = broadcastBodySchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ message: "Invalid input", errors: body.error.flatten() });
-  const { message, channel, photoFileId } = body.data;
+  const { message, channel, photoFileId, buttonText, buttonUrl } = body.data;
   if (!message.trim() && !photoFileId) {
     return res.status(400).json({ message: "Укажите текст сообщения или приложите фото." });
   }
@@ -560,6 +563,8 @@ botAdminRouter.post("/broadcast", async (req, res) => {
     subject: "",
     message: message.trim(),
     attachment,
+    buttonText,
+    buttonUrl,
   });
   return res.json(result);
 });

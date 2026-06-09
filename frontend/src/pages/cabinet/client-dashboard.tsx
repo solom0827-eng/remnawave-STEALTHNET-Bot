@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
+import { useCabinetDesign } from "@/lib/use-cabinet-design";
+import { StealthDashboard } from "@/pages/cabinet/stealth/stealth-dashboard";
 import {
   
   Package,
@@ -18,9 +21,13 @@ import {
   Loader2,
   Users,
   
-  Tag,
   AlertCircle,
-  Zap
+  Zap,
+  Smartphone,
+  Tag,
+  X,
+  RotateCcw,
+  RefreshCw,
 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { useCabinetConfig } from "@/contexts/cabinet-config";
@@ -28,8 +35,13 @@ import { useCabinetMiniapp } from "@/pages/cabinet/cabinet-layout";
 import { api } from "@/lib/api";
 import { formatRuDays } from "@/lib/i18n";
 import type { ClientPayment, ClientReferralStats } from "@/lib/api";
+import { TrialsPickerDialog } from "@/components/cabinet/trials-picker-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+
 
 function formatDate(s: string | null) {
   if (!s) return "—";
@@ -102,25 +114,48 @@ function parseSubscription(sub: unknown): {
   };
 }
 
+/**
+ * Wrapper: switcher между Classic-версией главной и новым Stealth-дизайном.
+ * Делается тонким wrapper'ом, чтобы не нарушать правила хуков (хуки реальной
+ * страницы вызываются только в той ветке которую рендерим).
+ */
 export function ClientDashboardPage() {
+  const design = useCabinetDesign();
+  if (design === "stealth") return <StealthDashboard />;
+  return <ClassicDashboardPage />;
+}
+
+function ClassicDashboardPage() {
+  const { t } = useTranslation();
   const { state, refreshProfile } = useClientAuth();
   const config = useCabinetConfig();
   const [searchParams, setSearchParams] = useSearchParams();
   const [subscription, setSubscription] = useState<unknown>(null);
+  const [secondarySubscriptions, setSecondarySubscriptions] = useState<Array<{ type: string; id: string; subscriptionIndex: number | null; subscription: unknown; tariffDisplayName: string; remnawaveUuid: string | null }>>([]);
+  // id главной подписки (#0) — для кнопки «Продлить» → /cabinet/tariffs?extend=
+  const [rootSubId, setRootSubId] = useState<string | null>(null);
   const [tariffDisplayName, setTariffDisplayName] = useState<string | null>(null);
+  const [autoRenewNext, setAutoRenewNext] = useState<{ amount: number | null; at: string | null; currency: string | null }>({ amount: null, at: null, currency: null });
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
   const [_payments, setPayments] = useState<ClientPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [paymentMessage, setPaymentMessage] = useState<"success_topup" | "success_tariff" | "success" | "failed" | null>(null);
   const [trialLoading, setTrialLoading] = useState(false);
   const [trialError, setTrialError] = useState<string | null>(null);
+  // новая мульти-триал система.
+  // hasMultiTrials=null → ещё не загружали; true → открываем модалку; false → legacy /trial.
+  const [hasMultiTrials, setHasMultiTrials] = useState<boolean | null>(null);
+  const [trialsPickerOpen, setTrialsPickerOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [_referralStats, setReferralStats] = useState<ClientReferralStats | null>(null);
+  const [deviceCount, setDeviceCount] = useState<number | null>(null);
+  // кол-во устройств по каждой подписке (subscriptionId → count) — для доп.подписок.
+  const [devicesBySubId, setDevicesBySubId] = useState<Record<string, number>>({});
+  const [autoRenewLoading, setAutoRenewLoading] = useState(false);
 
   const token = state.token;
   const isMiniapp = useCabinetMiniapp();
   const client = state.client;
-  const showTrial = config?.trialEnabled && !client?.trialUsed;
   const trialDays = config?.trialDays ?? 0;
 
   useEffect(() => {
@@ -143,6 +178,9 @@ export function ClientDashboardPage() {
     } else if (searchParams.get("yookassa") === "success") {
       setSearchParams({}, { replace: true });
       if (token) refreshProfile().catch(() => {});
+    } else if (searchParams.get("heleket") === "success") {
+      setSearchParams({}, { replace: true });
+      if (token) refreshProfile().catch(() => {});
     }
   }, [searchParams, setSearchParams, token, refreshProfile]);
 
@@ -154,16 +192,31 @@ export function ClientDashboardPage() {
     Promise.all([
       api.clientSubscription(token),
       api.clientPayments(token),
+      api.getClientDevices(token).catch(() => ({ total: 0 })),
+      api.clientAllSubscriptions(token).catch(() => ({ items: [] })),
+      api.getMyAllDevices(token).catch(() => ({ total: 0, items: [] })),
     ])
-      .then(([subRes, payRes]) => {
+      .then(([subRes, payRes, devRes, allSubRes, allDevRes]) => {
         if (cancelled) return;
         setSubscription(subRes.subscription ?? null);
         setTariffDisplayName(subRes.tariffDisplayName ?? null);
+        setAutoRenewNext({
+          amount: subRes.autoRenewNextChargeAmount ?? null,
+          at: subRes.autoRenewNextChargeAt ?? null,
+          currency: subRes.autoRenewCurrency ?? null,
+        });
         if (subRes.message) setSubscriptionError(subRes.message);
         setPayments(payRes.items ?? []);
+        setDeviceCount(devRes.total ?? null);
+        setSecondarySubscriptions((allSubRes.items || []).filter(s => s.type === "secondary"));
+        setRootSubId((allSubRes.items || []).find(s => s.type === "root")?.id ?? null);
+        // счётчик устройств по subscriptionId — для отображения «использовано/лимит» на доп.подписках.
+        const devCounts: Record<string, number> = {};
+        for (const d of (allDevRes.items || [])) devCounts[d.subscriptionId] = (devCounts[d.subscriptionId] || 0) + 1;
+        setDevicesBySubId(devCounts);
       })
       .catch((e) => {
-        if (!cancelled) setSubscriptionError(e instanceof Error ? e.message : "Ошибка загрузки");
+        if (!cancelled) setSubscriptionError(e instanceof Error ? e.message : t("cabinet.dashboard.error_loading"));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -176,8 +229,94 @@ export function ClientDashboardPage() {
     api.getClientReferralStats(token).then(setReferralStats).catch(() => {});
   }, [token, isMiniapp]);
 
+  // Auto-redeem pending gift code (saved by /gift/:code page before redirect to login/register)
+  const [giftRedeemMessage, setGiftRedeemMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!token || loading) return;
+    const pendingCode = localStorage.getItem("stealthnet_pending_gift");
+    if (!pendingCode) return;
+    localStorage.removeItem("stealthnet_pending_gift");
+    api.giftRedeemCode(token, pendingCode)
+      .then((res) => {
+        setGiftRedeemMessage({ type: "success", text: res.message || "Подарок активирован!" });
+        setRefreshKey((k) => k + 1);
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : "Не удалось активировать подарок";
+        setGiftRedeemMessage({ type: "error", text: msg });
+      });
+  }, [token, loading]);
+
+  async function toggleAutoRenew(enabled: boolean) {
+    if (!token || !client) return;
+    setAutoRenewLoading(true);
+    try {
+      await api.clientUpdateAutoRenew(token, { enabled });
+      await refreshProfile();
+    } catch (err) {
+      console.error("Failed to toggle auto-renew", err);
+    } finally {
+      setAutoRenewLoading(false);
+    }
+  }
+
+  const [autoRenewPromoInput, setAutoRenewPromoInput] = useState("");
+  const [autoRenewPromoLoading, setAutoRenewPromoLoading] = useState(false);
+  const [autoRenewPromoError, setAutoRenewPromoError] = useState<string | null>(null);
+  const [autoRenewPromoSaved, setAutoRenewPromoSaved] = useState(false);
+
+  useEffect(() => {
+    setAutoRenewPromoInput(client?.autoRenewPromoCode ?? "");
+    setAutoRenewPromoError(null);
+    setAutoRenewPromoSaved(false);
+  }, [client?.autoRenewPromoCode]);
+
+  async function saveAutoRenewPromo(code: string | null) {
+    if (!token) return;
+    setAutoRenewPromoError(null);
+    setAutoRenewPromoSaved(false);
+    setAutoRenewPromoLoading(true);
+    try {
+      await api.clientUpdateAutoRenew(token, { promoCode: code });
+      await refreshProfile();
+      setAutoRenewPromoSaved(true);
+      setTimeout(() => setAutoRenewPromoSaved(false), 2000);
+    } catch (e) {
+      setAutoRenewPromoError(e instanceof Error ? e.message : t("cabinet.dashboard.auto_renew_promo_error"));
+    } finally {
+      setAutoRenewPromoLoading(false);
+    }
+  }
+
+  // при заходе грузим список доступных триалов.
+  // Если их > 0 → кнопка «Бесплатный Тест» откроет модалку выбора.
+  // Если бэк вернул items=[] AND hasAnyEnabled=false → нет новых триалов вообще, fallback на legacy /trial.
+  // Если items=[] AND hasAnyEnabled=true → юзер уже всё использовал, модалку показывать не надо.
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    api.getClientAvailableTrials(token)
+      .then((res) => {
+        if (cancelled) return;
+        setHasMultiTrials(res.items.length > 0);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setHasMultiTrials(false); // не смогли загрузить → не блокируем legacy
+      });
+    return () => { cancelled = true; };
+  }, [token, refreshKey]);
+
   async function activateTrial() {
     if (!token) return;
+    // Новый флоу: открываем модалку выбора.
+    if (hasMultiTrials === true) {
+      setTrialError(null);
+      setTrialsPickerOpen(true);
+      return;
+    }
+    // Legacy фоллбэк (старая single-trial система).
     setTrialError(null);
     setTrialLoading(true);
     try {
@@ -185,10 +324,16 @@ export function ClientDashboardPage() {
       await refreshProfile();
       setRefreshKey((k) => k + 1);
     } catch (e) {
-      setTrialError(e instanceof Error ? e.message : "Ошибка активации триала");
+      setTrialError(e instanceof Error ? e.message : t("cabinet.dashboard.trial_error"));
     } finally {
       setTrialLoading(false);
     }
+  }
+
+  async function handleTrialActivated() {
+    // После активации триала через модалку — обновляем профиль и подписку.
+    await refreshProfile();
+    setRefreshKey((k) => k + 1);
   }
 
   if (!client) return null;
@@ -197,6 +342,16 @@ export function ClientDashboardPage() {
   const hasActiveSubscription =
     subscription && typeof subscription === "object" && (subParsed.status === "ACTIVE" || subParsed.status === undefined);
   const vpnUrl = subParsed.subscriptionUrl || null;
+  // если включена настройка «Страница подписки Remna» —
+  // кнопки «Подключиться» ведут напрямую на remna subscriptionUrl, а не на /cabinet/subscribe.
+  const useRemnaPage = config?.useRemnaSubscriptionPage === true;
+  // новые мульти-триалы могут показываться
+  // ВМЕСТЕ с активной подпиской — юзер мог взять Trial #1, потом купить тариф и захотеть
+  // ещё пробников. Legacy single-trial (`config.trialEnabled`) — старая система,
+  // показываем только когда нет активной подписки.
+  const showMultiTrials = hasMultiTrials === true;
+  const showLegacyTrial = !hasActiveSubscription && Boolean(config?.trialEnabled) && !client?.trialUsed && !showMultiTrials;
+  const showAnyTrial = showMultiTrials || showLegacyTrial;
   const [referralCopied, setReferralCopied] = useState<"site" | "bot" | null>(null);
   const siteOrigin = config?.publicAppUrl?.replace(/\/$/, "") || (typeof window !== "undefined" ? window.location.origin : "");
   const referralLinkSite =
@@ -232,19 +387,42 @@ export function ClientDashboardPage() {
         <Package className="h-8 w-8 text-primary/70" />
       </div>
       <div>
-        <h3 className="text-lg font-semibold text-foreground">Нет активной подписки</h3>
+        <h3 className="text-lg font-semibold text-foreground">{t("cabinet.dashboard.no_subscription_title")}</h3>
         <p className="text-[14px] text-muted-foreground max-w-xs mt-2 mx-auto leading-relaxed">
-          У вас пока нет привязанной подписки. Перейдите во вкладку Тарифы, чтобы выбрать и оплатить доступ.
+          {t("cabinet.dashboard.no_subscription_desc")}
         </p>
       </div>
-      <Button className="mt-2 shadow-lg h-11 px-6 rounded-xl hover:scale-105 transition-transform duration-300" asChild>
-        <Link to="/cabinet/tariffs">Выбрать тариф</Link>
+      <Button className="mt-2 shadow-lg h-11 px-6 rounded-xl hover:scale-105 transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none" asChild>
+        <Link to="/cabinet/tariffs" className="inline-flex items-center justify-center gap-2">
+          <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.choose_tariff")}</span>
+        </Link>
       </Button>
+      {/* T-expired-extend : если главная подписка #0 истекла — даём продлить ИМЕННО её,
+          а не только «Выбрать тариф». rootSubId есть всегда пока подписка #0 существует в БД (даже EXPIRED). */}
+      {rootSubId && (
+        <Button variant="outline" className="gap-2 h-11 px-6 rounded-xl border-primary/30 hover:bg-primary/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+          <Link to={`/cabinet/tariffs?extend=${rootSubId}`} className="inline-flex items-center justify-center gap-2">
+            <RefreshCw className="h-4 w-4 shrink-0" />
+            <span className="inline-flex items-center leading-none">Продлить подписку #0</span>
+          </Link>
+        </Button>
+      )}
     </div>
+  );
+
+  // модалка выбора триала — общая для mobile и desktop.
+  const trialsPickerNode = (
+    <TrialsPickerDialog
+      open={trialsPickerOpen}
+      token={token}
+      onOpenChange={setTrialsPickerOpen}
+      onActivated={handleTrialActivated}
+    />
   );
 
   if (isMiniapp) {
     return (
+      <>
       <div className="w-full min-w-0 overflow-hidden space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
         {(paymentMessage === "success" || paymentMessage === "success_topup" || paymentMessage === "success_tariff") && (
           <div className="rounded-xl bg-green-500/15 backdrop-blur-md border border-green-500/30 px-4 py-3 text-sm font-medium text-green-700 dark:text-green-400 shadow-sm">
@@ -260,79 +438,267 @@ export function ClientDashboardPage() {
             Оплата не прошла. Попробуйте снова.
           </div>
         )}
+        {giftRedeemMessage && (
+          <div className={`rounded-xl backdrop-blur-md px-4 py-3 text-sm font-medium shadow-sm ${giftRedeemMessage.type === "success" ? "bg-green-500/15 border border-green-500/30 text-green-700 dark:text-green-400" : "bg-destructive/15 border border-destructive/30 text-destructive"}`}>
+            {giftRedeemMessage.type === "success" ? "🎁 " : "❌ "}{giftRedeemMessage.text}
+          </div>
+        )}
+
+        {config?.botInfoBlock?.trim() && (
+          <div className="rounded-2xl border border-primary/30 bg-primary/5 backdrop-blur-md px-4 py-3 text-sm whitespace-pre-line shadow-sm">
+            {config.botInfoBlock.trim()}
+          </div>
+        )}
 
         {/* 1. Статус, срок, тариф, трафик, устройства — с иконками */}
-        <section className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl p-5 shadow-sm overflow-hidden transition-all duration-300">
+        <section data-tour="subscription" className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl p-5 shadow-sm overflow-hidden transition-all duration-300">
           <h2 className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/80 mb-5">
             <div className="p-1.5 bg-primary/20 rounded-lg">
               <Zap className="h-4 w-4 shrink-0 text-primary" />
             </div>
-            Статус Подписки
+            {t("cabinet.dashboard.subscription_status")}
           </h2>
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-8 w-8 animate-spin text-primary/50" />
             </div>
-          ) : subscriptionError || !hasActiveSubscription ? (
+          ) : subscriptionError || !subscription || typeof subscription !== "object" ? (
             <NoSubscriptionState />
           ) : (
             <div className="space-y-4 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold bg-green-500/20 text-green-700 dark:text-green-400 border border-green-500/20">
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                  Активна
-                </span>
+                {hasActiveSubscription ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold bg-green-500/20 text-green-700 dark:text-green-400 border border-green-500/20">
+                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                    {t("cabinet.dashboard.active")}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/20">
+                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                    Истекла
+                  </span>
+                )}
                 {daysLeft != null && (
                   <span className="text-sm font-semibold text-foreground bg-foreground/5 px-3 py-1.5 rounded-full border border-border/50">
-                    Осталось {daysLeft} {daysLeft === 1 ? "день" : daysLeft < 5 ? "дня" : "дней"}
+                    {t("cabinet.dashboard.days_left")} {daysLeft} {daysLeft === 1 ? t("cabinet.common.day_one") : daysLeft < 5 ? t("cabinet.common.day_few") : t("cabinet.common.day_many")}
+                  </span>
+                )}
+                {subParsed.hwidDeviceLimit != null && subParsed.hwidDeviceLimit > 0 && deviceCount != null && (
+                  <span className="text-sm font-semibold text-foreground bg-primary/10 text-primary px-3 py-1.5 rounded-full border border-primary/20 flex items-center gap-1.5">
+                    <Smartphone className="h-4 w-4" /> {deviceCount} / {subParsed.hwidDeviceLimit}
                   </span>
                 )}
               </div>
 
               <div className="space-y-3 border-t border-border/50 pt-4 mt-2">
-                {subParsed.expireAt && (
-                  <div className="flex items-center gap-3 min-w-0 bg-background/30 p-2.5 rounded-xl border border-border/50">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                      <Calendar className="h-5 w-5" />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">До окончания</p>
-                      <p className="text-[15px] font-semibold truncate text-foreground">{formatDate(subParsed.expireAt)}</p>
-                    </div>
-                  </div>
-                )}
-                {(tariffDisplayName ?? subParsed.productName) && (
-                  <div className="flex items-center gap-3 min-w-0 bg-background/30 p-2.5 rounded-xl border border-border/50">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                {((tariffDisplayName ?? subParsed.productName) || client?.trialUsed) && (
+                  <div className="flex items-center gap-4 bg-background/40 p-3.5 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
                       <Package className="h-5 w-5" />
-                    </span>
+                    </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Тариф</p>
-                      <p className="text-[15px] font-semibold truncate text-foreground" title={tariffDisplayName ?? subParsed.productName ?? ""}>{tariffDisplayName ?? subParsed.productName ?? ""}</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.tariff_label")}</p>
+                      <p className="text-[14px] font-semibold truncate text-foreground" title={((tariffDisplayName ?? subParsed.productName?.trim() ?? "").trim()) || t("cabinet.dashboard.test_label")}>
+                        {((tariffDisplayName ?? subParsed.productName?.trim() ?? "").trim()) || t("cabinet.dashboard.test_label")}
+                      </p>
                     </div>
                   </div>
                 )}
-                <div className="flex items-center gap-3 min-w-0 bg-background/30 p-2.5 rounded-xl border border-border/50">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                    <Wifi className="h-5 w-5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Трафик</p>
-                    <p className="text-[15px] font-semibold truncate text-foreground">
-                      {subParsed.trafficLimitBytes != null && subParsed.trafficLimitBytes > 0
-                        ? subParsed.trafficUsed != null
-                          ? `${formatBytes(subParsed.trafficUsed)} из ${formatBytes(subParsed.trafficLimitBytes)}`
-                          : `Лимит ${formatBytes(subParsed.trafficLimitBytes)}`
-                        : subParsed.trafficUsed != null
-                          ? `Использовано ${formatBytes(subParsed.trafficUsed)}`
-                          : "Без лимита"}
-                    </p>
+                {subParsed.expireAt && (
+                  <div className="flex items-center gap-4 bg-background/40 p-3.5 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Calendar className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.valid_until")}</p>
+                      <p className="text-[14px] font-semibold text-foreground">
+                        {formatDate(subParsed.expireAt)}
+                      </p>
+                    </div>
                   </div>
+                )}
+                <div className="bg-background/40 p-3.5 rounded-2xl border border-border/50 space-y-3 transition-colors hover:bg-background/60 shadow-sm">
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Wifi className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.traffic")}</p>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[14px] font-semibold text-foreground">
+                          {subParsed.trafficLimitBytes != null && subParsed.trafficLimitBytes > 0
+                            ? `${formatBytes(subParsed.trafficUsed ?? 0)} / ${formatBytes(subParsed.trafficLimitBytes)}`
+                            : t("cabinet.dashboard.unlimited")}
+                        </p>
+                        {trafficPercent != null && <span className="text-[12px] font-bold text-muted-foreground">{trafficPercent}%</span>}
+                      </div>
+                    </div>
+                  </div>
+                  {trafficPercent != null && (
+                    <div className="h-2 w-full rounded-full bg-muted/30 overflow-hidden">
+                      <div className="h-full rounded-full bg-primary transition-all duration-500 ease-in-out" style={{ width: `${trafficPercent}%` }} />
+                    </div>
+                  )}
                 </div>
+              </div>
+              {/* Кнопки основной подписки: Подключиться + Продлить (как у доп. подписок) */}
+              <div className="pt-2 flex flex-col sm:flex-row gap-2">
+                <Button className="flex-1 gap-2 shadow-lg h-12 rounded-xl text-md hover:scale-[1.02] transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none bg-indigo-600 hover:bg-indigo-700 text-white" asChild>
+                  {useRemnaPage && vpnUrl ? (
+                    <a href={vpnUrl} target="_blank" rel="noopener noreferrer" className="inline-flex w-full items-center justify-center gap-2">
+                      <Wifi className="h-5 w-5 shrink-0" />
+                      <span className="inline-flex items-center leading-none">Подключиться</span>
+                    </a>
+                  ) : (
+                    <Link to="/cabinet/subscribe" className="inline-flex w-full items-center justify-center gap-2">
+                      <Wifi className="h-5 w-5 shrink-0" />
+                      <span className="inline-flex items-center leading-none">Подключиться</span>
+                    </Link>
+                  )}
+                </Button>
+                {rootSubId && (
+                  <Button variant="outline" className="sm:w-auto gap-2 h-12 rounded-xl text-md border-indigo-500/30 hover:bg-indigo-500/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+                    <Link to={`/cabinet/tariffs?extend=${rootSubId}`} className="inline-flex items-center justify-center gap-2">
+                      <RefreshCw className="h-5 w-5 shrink-0" />
+                      <span className="inline-flex items-center leading-none">Продлить</span>
+                    </Link>
+                  </Button>
+                )}
               </div>
             </div>
           )}
         </section>
+
+        {secondarySubscriptions.length > 0 && secondarySubscriptions.map((sec) => {
+          const secParsed = parseSubscription(sec.subscription);
+          const secHasActive = sec.subscription && typeof sec.subscription === "object" && (secParsed.status === "ACTIVE" || secParsed.status === undefined);
+          const secExpireDate = secParsed.expireAt ? new Date(secParsed.expireAt) : null;
+          const secDaysLeft = secExpireDate && secExpireDate > new Date() ? Math.max(0, Math.ceil((secExpireDate.getTime() - Date.now()) / (24*60*60*1000))) : null;
+          const secTrafficPercent = secParsed.trafficLimitBytes && secParsed.trafficLimitBytes > 0 && secParsed.trafficUsed != null ? Math.min(100, Math.round((secParsed.trafficUsed / secParsed.trafficLimitBytes) * 100)) : null;
+
+          return (
+            <section key={sec.id} className="rounded-3xl border border-indigo-500/30 bg-card/40 backdrop-blur-xl p-5 shadow-sm overflow-hidden transition-all duration-300">
+              <h2 className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/80 mb-4">
+                <div className="p-1.5 bg-indigo-500/20 rounded-lg">
+                  <Package className="h-4 w-4 shrink-0 text-indigo-400" />
+                </div>
+                Дополнительная подписка #{sec.subscriptionIndex ?? ""}
+              </h2>
+              
+              <div className="space-y-4 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {secHasActive ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold bg-indigo-500/20 text-indigo-400 border border-indigo-500/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      Активна
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold bg-muted/30 text-muted-foreground border border-border/50">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      Неактивна
+                    </span>
+                  )}
+                  {secDaysLeft != null && (
+                    <span className="text-sm font-semibold text-foreground bg-foreground/5 px-3 py-1.5 rounded-full border border-border/50">
+                      {t("cabinet.dashboard.days_left")} {secDaysLeft} {secDaysLeft === 1 ? t("cabinet.common.day_one") : secDaysLeft < 5 ? t("cabinet.common.day_few") : t("cabinet.common.day_many")}
+                    </span>
+                  )}
+                  {secParsed.hwidDeviceLimit != null && secParsed.hwidDeviceLimit > 0 && (
+                    <span className="text-sm font-semibold text-foreground bg-indigo-500/10 text-indigo-400 px-3 py-1.5 rounded-full border border-indigo-500/20 flex items-center gap-1.5">
+                      <Smartphone className="h-4 w-4" /> {devicesBySubId[sec.id] ?? 0} / {secParsed.hwidDeviceLimit}
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-3 border-t border-border/50 pt-4 mt-2">
+                  {sec.tariffDisplayName && (
+                    <div className="flex items-center gap-4 bg-background/40 p-3.5 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                        <Package className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.tariff_label")}</p>
+                        <p className="text-[14px] font-semibold truncate text-foreground" title={sec.tariffDisplayName}>
+                          {sec.tariffDisplayName}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {secParsed.expireAt && (
+                    <div className="flex items-center gap-4 bg-background/40 p-3.5 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                        <Calendar className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.valid_until")}</p>
+                        <p className="text-[14px] font-semibold text-foreground">
+                          {formatDate(secParsed.expireAt)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="bg-background/40 p-3.5 rounded-2xl border border-border/50 space-y-3 transition-colors hover:bg-background/60 shadow-sm">
+                    <div className="flex items-center gap-4">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                        <Wifi className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.traffic")}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[14px] font-semibold text-foreground">
+                            {secParsed.trafficLimitBytes != null && secParsed.trafficLimitBytes > 0
+                              ? `${formatBytes(secParsed.trafficUsed ?? 0)} / ${formatBytes(secParsed.trafficLimitBytes)}`
+                              : t("cabinet.dashboard.unlimited")}
+                          </p>
+                          {secTrafficPercent != null && <span className="text-[12px] font-bold text-muted-foreground">{secTrafficPercent}%</span>}
+                        </div>
+                      </div>
+                    </div>
+                    {secTrafficPercent != null && (
+                      <div className="h-2 w-full rounded-full bg-muted/30 overflow-hidden">
+                        <div className="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-in-out" style={{ width: `${secTrafficPercent}%` }} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* T-sub-link : ссылка подписки доп.подписки + копирование прямо на главной (без захода в «Подключиться»). */}
+                {secParsed.subscriptionUrl && (
+                  <div className="flex gap-2 min-w-0 pt-1">
+                    <code className="flex-1 min-w-0 truncate rounded-xl bg-background/50 border border-border/50 px-3 py-2.5 text-xs font-mono flex items-center text-foreground/80" title={secParsed.subscriptionUrl}>
+                      {secParsed.subscriptionUrl}
+                    </code>
+                    <Button size="icon" variant="outline" className="shrink-0 h-auto w-11 rounded-xl bg-background/50 hover:bg-background/80 transition-transform hover:scale-105" onClick={() => { navigator.clipboard.writeText(secParsed.subscriptionUrl || ""); window.Telegram?.WebApp?.showPopup?.({ title: t("cabinet.dashboard.copied_title"), message: t("cabinet.dashboard.copied_message") }); }}>
+                      <Copy className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+                <div className="pt-2 flex flex-col sm:flex-row gap-2">
+                  <Button className="flex-1 gap-2 shadow-lg h-12 rounded-xl text-md hover:scale-[1.02] transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none bg-indigo-600 hover:bg-indigo-700 text-white" asChild>
+                    {useRemnaPage && secParsed.subscriptionUrl ? (
+                      <a href={secParsed.subscriptionUrl} target="_blank" rel="noopener noreferrer" className="inline-flex w-full items-center justify-center gap-2">
+                        <Wifi className="h-5 w-5 shrink-0" />
+                        <span className="inline-flex items-center leading-none">Подключиться</span>
+                      </a>
+                    ) : (
+                      <Link to={`/cabinet/subscribe?uuid=${sec.remnawaveUuid}`} className="inline-flex w-full items-center justify-center gap-2">
+                        <Wifi className="h-5 w-5 shrink-0" />
+                        <span className="inline-flex items-center leading-none">Подключиться</span>
+                      </Link>
+                    )}
+                  </Button>
+                  {/* T-unify-cabinet: продлить ИМЕННО эту доп. подписку */}
+                  <Button variant="outline" className="sm:w-auto gap-2 h-12 rounded-xl text-md border-indigo-500/30 hover:bg-indigo-500/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+                    <Link to={`/cabinet/tariffs?extend=${sec.id}`} className="inline-flex items-center justify-center gap-2">
+                      <RefreshCw className="h-5 w-5 shrink-0" />
+                      <span className="inline-flex items-center leading-none">Продлить</span>
+                    </Link>
+                  </Button>
+                </div>
+              </div>
+            </section>
+          );
+        })}
 
         {/* 2. Как подключиться — ссылка и кнопка */}
         <section className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl p-5 shadow-sm overflow-hidden transition-all duration-300">
@@ -340,11 +706,11 @@ export function ClientDashboardPage() {
              <div className="p-1.5 bg-primary/20 rounded-lg">
               <Wifi className="h-4 w-4 shrink-0 text-primary" />
             </div>
-            Подключение
+            {t("cabinet.dashboard.connection")}
           </h2>
           {vpnUrl ? (
             <div className="space-y-4">
-              <p className="text-[14px] text-muted-foreground leading-relaxed">Нажмите кнопку ниже — откроется страница с приложениями и настройкой в 1 клик.</p>
+              <p className="text-[14px] text-muted-foreground leading-relaxed">{t("cabinet.dashboard.connection_desc")}</p>
               <div className="flex gap-2 min-w-0">
                 <code className="flex-1 min-w-0 truncate rounded-xl bg-background/50 border border-border/50 px-3 py-2.5 text-xs font-mono flex items-center text-foreground/80" title={vpnUrl}>
                   {vpnUrl}
@@ -355,30 +721,49 @@ export function ClientDashboardPage() {
                   className="shrink-0 h-auto w-11 rounded-xl bg-background/50 hover:bg-background/80 transition-transform hover:scale-105"
                   onClick={() => {
                     navigator.clipboard.writeText(vpnUrl);
-                    window.Telegram?.WebApp?.showPopup?.({ title: "Скопировано", message: "Ссылка в буфере обмена" });
+                    window.Telegram?.WebApp?.showPopup?.({ title: t("cabinet.dashboard.copied_title"), message: t("cabinet.dashboard.copied_message") });
                   }}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
               </div>
-              <Button className="w-full gap-2 shadow-lg h-12 rounded-xl text-md hover:scale-[1.02] transition-transform duration-300" asChild>
-                <Link to="/cabinet/subscribe">
+              <Button className="w-full gap-2 shadow-lg h-12 rounded-xl text-md hover:scale-[1.02] transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none" asChild>
+                <Link to="/cabinet/subscribe" className="inline-flex w-full items-center justify-center gap-2">
                   <Wifi className="h-5 w-5 shrink-0" />
-                  Подключиться к VPN
+                  <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.connect_vpn")}</span>
                 </Link>
               </Button>
+              {/* продлить главную подписку (#0) — как в боте */}
+              {rootSubId && (
+                <Button variant="outline" className="w-full gap-2 h-12 rounded-xl text-md border-primary/30 hover:bg-primary/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+                  <Link to={`/cabinet/tariffs?extend=${rootSubId}`} className="inline-flex w-full items-center justify-center gap-2">
+                    <RefreshCw className="h-5 w-5 shrink-0" />
+                    <span className="inline-flex items-center leading-none">Продлить подписку #0</span>
+                  </Link>
+                </Button>
+              )}
+              {/* дополнительные пробники доступны рядом с активной подпиской. */}
+              {showMultiTrials && (
+                <Button className="w-full gap-2 bg-green-600 hover:bg-green-700 text-white shadow-lg h-12 rounded-xl hover:scale-[1.02] transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none" onClick={activateTrial} disabled={trialLoading}>
+                  {trialLoading ? <Loader2 className="h-5 w-5 shrink-0 animate-spin" /> : <Gift className="h-5 w-5 shrink-0" />}
+                  <span className="inline-flex items-center leading-none font-medium text-base">{t("cabinet.dashboard.free_trial")}</span>
+                </Button>
+              )}
+              {trialError && <p className="text-sm text-destructive break-words text-center">{trialError}</p>}
             </div>
-          ) : showTrial ? (
+          ) : showAnyTrial ? (
             <div className="space-y-4 text-center">
               <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-green-500/10 text-green-600 mb-2">
                  <Gift className="h-6 w-6" />
               </div>
               <p className="text-[14px] text-muted-foreground">
-                Получите бесплатный доступ на {formatRuDays(trialDays)}.
+                {showMultiTrials
+                  ? "Возьми бесплатный пробник — попробуй VPN без оплаты"
+                  : `${t("cabinet.dashboard.free_trial_desc")} ${formatRuDays(trialDays)}.`}
               </p>
-              <Button className="w-full gap-2 bg-green-600 hover:bg-green-700 text-white shadow-lg h-12 rounded-xl hover:scale-[1.02] transition-transform duration-300" onClick={activateTrial} disabled={trialLoading}>
+              <Button className="w-full gap-2 bg-green-600 hover:bg-green-700 text-white shadow-lg h-12 rounded-xl hover:scale-[1.02] transition-transform duration-300 [&_svg]:self-center [&_span]:leading-none" onClick={activateTrial} disabled={trialLoading}>
                 {trialLoading ? <Loader2 className="h-5 w-5 shrink-0 animate-spin" /> : <Gift className="h-5 w-5 shrink-0" />}
-                <span className="font-medium text-base">Активировать триал</span>
+                <span className="inline-flex items-center leading-none font-medium text-base">{t("cabinet.dashboard.free_trial")}</span>
               </Button>
               {trialError && <p className="text-sm text-destructive break-words text-center">{trialError}</p>}
             </div>
@@ -386,34 +771,113 @@ export function ClientDashboardPage() {
             <div className="space-y-4">
               <div className="p-4 bg-primary/10 rounded-2xl border border-primary/20 text-[14px] text-primary flex gap-3 items-start">
                 <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
-                <p className="leading-relaxed">Ссылка появится после оплаты тарифа. Перейдите во вкладку «Тарифы» и оплатите.</p>
+                <p className="leading-relaxed">{t("cabinet.dashboard.link_after_payment")}</p>
               </div>
-              <Button className="w-full shadow-md rounded-xl hover:scale-[1.02] transition-transform duration-300 h-12" variant="default" asChild>
-                <Link to="/cabinet/tariffs">Выбрать тариф</Link>
+              <Button className="w-full shadow-md rounded-xl hover:scale-[1.02] transition-transform duration-300 h-12 [&_svg]:self-center [&_span]:leading-none" variant="default" asChild>
+                <Link to="/cabinet/tariffs" className="inline-flex w-full items-center justify-center gap-2">
+                  <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.choose_tariff")}</span>
+                </Link>
               </Button>
             </div>
           )}
         </section>
 
         {/* 3. Баланс */}
-        <section className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl p-6 shadow-sm overflow-hidden flex items-center justify-between transition-all duration-300">
-          <div>
-            <h2 className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground/80 mb-1">Мой баланс</h2>
-            <p className="text-3xl font-bold tracking-tight text-foreground">{formatMoney(client.balance, client.preferredCurrency)}</p>
+        <section data-tour="balance" className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl p-5 shadow-sm overflow-hidden transition-all duration-300 flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-primary/20 rounded-xl">
+              <Wallet className="h-5 w-5 text-primary" />
+            </div>
+            <div>
+              <h2 className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground/80">{t("cabinet.dashboard.my_balance")}</h2>
+              <p className="text-2xl font-bold tracking-tight text-foreground leading-none mt-1">{formatMoney(client.balance, client.preferredCurrency)}</p>
+            </div>
           </div>
-          <Button className="gap-2 shadow-md hover:scale-105 transition-transform duration-300 rounded-2xl h-12 px-5" asChild>
-            <Link to="/cabinet/profile#topup">
+          <div className="flex items-center justify-between p-3 rounded-2xl bg-background/40 border border-border/50">
+            <div className="flex flex-col min-w-0">
+              <Label className="text-sm font-semibold">{t("cabinet.dashboard.auto_renew")}</Label>
+              {client.autoRenewEnabled && autoRenewNext.amount != null ? (
+                <span className="text-[11px] mt-0.5 leading-tight inline-flex items-center gap-1 truncate">
+                  <RotateCcw className="h-3 w-3 text-primary shrink-0" />
+                  <span className="font-bold tabular-nums text-foreground">
+                    {autoRenewNext.amount.toLocaleString("ru-RU")} {autoRenewNext.currency === "RUB" ? "₽" : autoRenewNext.currency === "USD" ? "$" : autoRenewNext.currency}
+                  </span>
+                  {autoRenewNext.at && (
+                    <span className="text-muted-foreground">
+                      · {new Date(autoRenewNext.at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
+                  {config?.yookassaRecurringEnabled
+                    ? <>Сначала с баланса{client.yookassaPaymentMethodTitle ? <>, затем с карты <span className="font-medium">{client.yookassaPaymentMethodTitle}</span></> : ", затем с карты"}</>
+                    : "Списание с баланса"
+                  }
+                </span>
+              )}
+            </div>
+            <Switch
+              checked={client.autoRenewEnabled ?? false}
+              disabled={autoRenewLoading}
+              onCheckedChange={toggleAutoRenew}
+            />
+          </div>
+          {client.autoRenewEnabled && (
+            <div className="flex items-center gap-2 p-2.5 pl-3 rounded-2xl bg-background/40 border border-border/50">
+              <Tag className="h-4 w-4 text-primary shrink-0" />
+              <Input
+                value={autoRenewPromoInput}
+                onChange={(e) => { setAutoRenewPromoInput(e.target.value.toUpperCase()); setAutoRenewPromoError(null); setAutoRenewPromoSaved(false); }}
+                placeholder={t("cabinet.dashboard.auto_renew_promo_placeholder")}
+                className="h-8 bg-transparent border-0 px-0 text-sm font-mono uppercase focus-visible:ring-0 placeholder:text-muted-foreground/60 shadow-none"
+                disabled={autoRenewPromoLoading}
+                title={t("cabinet.dashboard.auto_renew_promo_hint")}
+              />
+              {autoRenewPromoLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+              ) : autoRenewPromoSaved ? (
+                <Check className="h-4 w-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
+              ) : client.autoRenewPromoCode && autoRenewPromoInput === client.autoRenewPromoCode ? (
+                <button
+                  type="button"
+                  onClick={() => saveAutoRenewPromo(null)}
+                  className="h-7 w-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
+                  title={t("cabinet.dashboard.auto_renew_promo_remove")}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!autoRenewPromoInput.trim()}
+                  onClick={() => saveAutoRenewPromo(autoRenewPromoInput.trim())}
+                  className="h-7 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 hover:bg-primary/25 text-primary disabled:opacity-40 disabled:hover:bg-primary/15 transition-colors shrink-0"
+                >
+                  {t("cabinet.dashboard.auto_renew_promo_save")}
+                </button>
+              )}
+            </div>
+          )}
+          {client.autoRenewEnabled && autoRenewPromoError && (
+            <p className="text-[11px] font-medium text-red-500 dark:text-red-400 -mt-2">{autoRenewPromoError}</p>
+          )}
+          <Button className="w-full gap-2 shadow-md hover:scale-[1.02] transition-transform duration-300 rounded-xl h-12 [&_svg]:self-center [&_span]:leading-none" asChild>
+            <Link to="/cabinet/profile#topup" className="inline-flex w-full items-center justify-center gap-2">
               <PlusCircle className="h-5 w-5 shrink-0" />
-              Пополнить
+              <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.top_up")}</span>
             </Link>
           </Button>
         </section>
       </div>
+      {trialsPickerNode}
+      </>
     );
   }
 
   // DESKTOP LAYOUT
   return (
+    <>
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-6xl mx-auto">
       {/* Hero + CTA */}
       <motion.section
@@ -428,110 +892,179 @@ export function ClientDashboardPage() {
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
           <div className="flex-1">
             <h1 className="text-3xl font-bold tracking-tight sm:text-4xl text-foreground">
-              Добро пожаловать{client.email ? `, ${client.email.split("@")[0]}` : client.telegramUsername ? `, @${client.telegramUsername}` : ""}
+              {t("cabinet.dashboard.welcome")}{client.email ? `, ${client.email.split("@")[0]}` : client.telegramUsername ? `, @${client.telegramUsername}` : ""}
             </h1>
             <p className="mt-3 text-[16px] text-muted-foreground max-w-xl leading-relaxed">
               {hasActiveSubscription
-                ? "Ваша подписка активна. Подключитесь к VPN и наслаждайтесь свободным интернетом."
-                : "Подключитесь к VPN — выберите удобный тариф и оплатите прямо на сайте."}
+                ? t("cabinet.dashboard.sub_active_desc")
+                : t("cabinet.dashboard.sub_inactive_desc")}
             </p>
             
             {(paymentMessage === "success" || paymentMessage === "success_topup" || paymentMessage === "success_tariff") && (
               <div className="mt-4 inline-flex items-center gap-2 bg-green-500/15 border border-green-500/30 px-4 py-2 rounded-xl text-green-700 dark:text-green-400 font-medium text-sm">
                 <Check className="h-4 w-4" />
-                {paymentMessage === "success_topup" ? "Баланс пополнен." : paymentMessage === "success_tariff" ? "Тариф активирован." : "Оплата прошла успешно."}
+                {t("cabinet.dashboard.payment_success")}
               </div>
             )}
             {paymentMessage === "failed" && (
               <div className="mt-4 inline-flex items-center gap-2 bg-destructive/15 border border-destructive/30 px-4 py-2 rounded-xl text-destructive font-medium text-sm">
                 <AlertCircle className="h-4 w-4" />
-                Оплата не прошла. Попробуйте снова.
+                {t("cabinet.dashboard.payment_failed")}
+              </div>
+            )}
+            {giftRedeemMessage && (
+              <div className={`mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ${giftRedeemMessage.type === "success" ? "bg-green-500/15 border border-green-500/30 text-green-700 dark:text-green-400" : "bg-destructive/15 border border-destructive/30 text-destructive"}`}>
+                {giftRedeemMessage.type === "success" ? "🎁" : "❌"} {giftRedeemMessage.text}
               </div>
             )}
             {trialError && <p className="mt-3 text-sm text-destructive font-medium">{trialError}</p>}
           </div>
 
           <div className="flex flex-col sm:flex-row md:flex-col gap-3 shrink-0 min-w-[240px]">
-            {showTrial ? (
-              <Button size="lg" className="w-full gap-2 shadow-xl bg-green-600 hover:bg-green-700 text-white rounded-xl h-14 hover:scale-105 transition-transform" onClick={activateTrial} disabled={trialLoading}>
-                {trialLoading ? <Loader2 className="h-5 w-5 shrink-0 animate-spin" /> : <Gift className="h-5 w-5 shrink-0" />}
-                <span className="text-base font-medium">Бесплатный триал</span>
+            {/* «Бесплатный Тест» (мульти-триал) и
+                «Подключиться» могут показываться ВМЕСТЕ. Legacy single-trial — только когда нет подписки. */}
+            {vpnUrl && (
+              <Button size="lg" className="w-full gap-2 shadow-xl rounded-xl h-14 hover:scale-105 transition-transform bg-primary text-primary-foreground [&_svg]:self-center [&_span]:leading-none" asChild>
+                {useRemnaPage ? (
+                  <a href={vpnUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 leading-none">
+                    <Wifi className="h-5 w-5 shrink-0" />
+                    <span className="inline-flex items-center text-base font-medium leading-none">{t("cabinet.dashboard.connect_vpn")}</span>
+                  </a>
+                ) : (
+                  <Link to="/cabinet/subscribe" className="inline-flex items-center justify-center gap-2 leading-none">
+                    <Wifi className="h-5 w-5 shrink-0" />
+                    <span className="inline-flex items-center text-base font-medium leading-none">{t("cabinet.dashboard.connect_vpn")}</span>
+                  </Link>
+                )}
               </Button>
-            ) : vpnUrl ? (
-              <Button size="lg" className="w-full gap-2 shadow-xl rounded-xl h-14 hover:scale-105 transition-transform bg-primary text-primary-foreground" asChild>
-                <Link to="/cabinet/subscribe">
-                  <Wifi className="h-5 w-5 shrink-0" />
-                  <span className="text-base font-medium">Настроить VPN</span>
-                </Link>
-              </Button>
-            ) : (
-              <Button size="lg" variant="default" className="w-full gap-2 shadow-xl rounded-xl h-14 hover:scale-105 transition-transform" asChild>
-                <Link to="/cabinet/tariffs">
-                  <Package className="h-5 w-5 shrink-0" />
-                  <span className="text-base font-medium">Выбрать тариф</span>
+            )}
+            {/* продлить главную подписку (#0) */}
+            {vpnUrl && rootSubId && (
+              <Button variant="outline" size="lg" className="w-full gap-2 rounded-xl h-14 hover:scale-105 transition-transform border-primary/30 hover:bg-primary/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+                <Link to={`/cabinet/tariffs?extend=${rootSubId}`} className="inline-flex items-center justify-center gap-2 leading-none">
+                  <RefreshCw className="h-5 w-5 shrink-0" />
+                  <span className="inline-flex items-center text-base font-medium leading-none">Продлить #0</span>
                 </Link>
               </Button>
             )}
-            <Button variant="secondary" size="lg" className="w-full gap-2 rounded-xl h-14 hover:scale-105 transition-transform bg-background/50 hover:bg-background/80 border border-border/50" asChild>
-              <Link to="/cabinet/profile#topup">
+            {showAnyTrial && (
+              <Button size="lg" className="w-full gap-2 shadow-xl bg-green-600 hover:bg-green-700 text-white rounded-xl h-14 hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none" onClick={activateTrial} disabled={trialLoading}>
+                {trialLoading ? <Loader2 className="h-5 w-5 shrink-0 animate-spin" /> : <Gift className="h-5 w-5 shrink-0" />}
+                <span className="inline-flex items-center text-base font-medium leading-none">{t("cabinet.dashboard.free_trial")}</span>
+              </Button>
+            )}
+            {!vpnUrl && !showAnyTrial && (
+              <Button size="lg" variant="default" className="w-full gap-2 shadow-xl rounded-xl h-14 hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none" asChild>
+                <Link to="/cabinet/tariffs" className="inline-flex items-center justify-center gap-2 leading-none">
+                  <Package className="h-5 w-5 shrink-0" />
+                  <span className="inline-flex items-center text-base font-medium leading-none">{t("cabinet.dashboard.choose_tariff")}</span>
+                </Link>
+              </Button>
+            )}
+            <Button variant="secondary" size="lg" className="w-full gap-2 rounded-xl h-14 hover:scale-105 transition-transform bg-background/50 hover:bg-background/80 border border-border/50 [&_svg]:self-center [&_span]:leading-none" asChild>
+              <Link to="/cabinet/profile#topup" className="inline-flex items-center justify-center gap-2 leading-none">
                 <PlusCircle className="h-5 w-5 shrink-0 text-foreground/70" />
-                <span className="text-base font-medium">Пополнить баланс</span>
+                <span className="inline-flex items-center text-base font-medium leading-none">{t("cabinet.dashboard.top_up")}</span>
               </Link>
             </Button>
           </div>
         </div>
       </motion.section>
 
+      {config?.botInfoBlock?.trim() && (
+        <div className="rounded-2xl border border-primary/30 bg-primary/5 backdrop-blur-md px-5 py-4 text-sm whitespace-pre-line shadow-sm">
+          {config.botInfoBlock.trim()}
+        </div>
+      )}
+
       {/* Cards grid */}
       <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
         {/* Подписка / тариф */}
-        <Card className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl shadow-lg hover:shadow-xl transition-all duration-300 sm:col-span-2 lg:col-span-1 flex flex-col">
+        <Card data-tour="subscription" className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl shadow-lg hover:shadow-xl transition-all duration-300 sm:col-span-2 lg:col-span-1 flex flex-col">
           <CardHeader className="pb-4">
             <CardTitle className="flex items-center gap-3 text-xl text-foreground">
               <div className="p-2.5 bg-primary/20 rounded-xl">
                 <Package className="h-6 w-6 text-primary" />
               </div>
-              Моя Подписка
+              {t("cabinet.dashboard.my_subscription")}
             </CardTitle>
           </CardHeader>
           <CardContent className="flex-1 flex flex-col justify-center">
             {loading ? (
               <div className="flex justify-center py-6"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
-            ) : subscriptionError || !hasActiveSubscription ? (
+            ) : subscriptionError || !subscription || typeof subscription !== "object" ? (
               <NoSubscriptionState />
             ) : (
               <div className="space-y-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold bg-green-500/15 text-green-700 dark:text-green-400 border border-green-500/20">
-                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                    Активна
-                  </span>
+                <div className="flex items-center gap-2 flex-wrap mb-2">
+                  {hasActiveSubscription ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold bg-green-500/15 text-green-700 dark:text-green-400 border border-green-500/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      {t("cabinet.dashboard.active")}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      Истекла
+                    </span>
+                  )}
+                  {daysLeft != null && (
+                    <span className="text-sm font-semibold text-foreground bg-foreground/5 px-3 py-1.5 rounded-full border border-border/50 shadow-sm">
+                      {daysLeft} {daysLeft === 1 ? t("cabinet.common.day_one") : daysLeft < 5 ? t("cabinet.common.day_few") : t("cabinet.common.day_many")}
+                    </span>
+                  )}
+                  {subParsed.hwidDeviceLimit != null && subParsed.hwidDeviceLimit > 0 && deviceCount != null && (
+                    <span className="text-sm font-semibold text-foreground bg-primary/10 text-primary px-3 py-1.5 rounded-full border border-primary/20 shadow-sm flex items-center gap-1.5">
+                      <Smartphone className="h-4 w-4" /> {deviceCount} / {subParsed.hwidDeviceLimit}
+                    </span>
+                  )}
                 </div>
                 {((tariffDisplayName ?? subParsed.productName) || client?.trialUsed) && (
-                  <div className="flex items-center gap-3 text-[15px] font-medium text-foreground bg-background/40 p-3.5 rounded-xl border border-border/50">
-                    <Tag className="h-5 w-5 shrink-0 text-primary" />
-                    <span className="truncate">Тариф: {((tariffDisplayName ?? subParsed.productName?.trim() ?? "").trim()) || "Триал"}</span>
+                  <div className="flex items-center gap-4 bg-background/40 p-4 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Package className="h-6 w-6" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.tariff_label")}</p>
+                      <p className="text-[15px] font-semibold truncate text-foreground">
+                        {((tariffDisplayName ?? subParsed.productName?.trim() ?? "").trim()) || t("cabinet.dashboard.test_label")}
+                      </p>
+                    </div>
                   </div>
                 )}
                 {subParsed.expireAt && (
-                  <div className="flex items-center gap-3 text-[15px] font-medium text-foreground bg-background/40 p-3.5 rounded-xl border border-border/50">
-                    <Calendar className="h-5 w-5 shrink-0 text-primary" />
-                    <span>До {formatDate(subParsed.expireAt)}</span>
+                  <div className="flex items-center gap-4 bg-background/40 p-4 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Calendar className="h-6 w-6" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.valid_until")}</p>
+                      <p className="text-[15px] font-semibold text-foreground">
+                        {formatDate(subParsed.expireAt)}
+                      </p>
+                    </div>
                   </div>
                 )}
-                <div className="space-y-3 bg-background/40 p-4 rounded-xl border border-border/50">
-                  <div className="flex items-center justify-between text-[15px] font-medium text-foreground">
-                    <span className="flex items-center gap-3">
-                      <Wifi className="h-5 w-5 shrink-0 text-primary" />
-                      {subParsed.trafficLimitBytes != null && subParsed.trafficLimitBytes > 0
-                        ? `${formatBytes(subParsed.trafficUsed ?? 0)} / ${formatBytes(subParsed.trafficLimitBytes)}`
-                        : "Трафик: Безлимит"}
-                    </span>
-                    {trafficPercent != null && <span className="text-muted-foreground text-[14px]">{trafficPercent}%</span>}
+                <div className="bg-background/40 p-4 rounded-2xl border border-border/50 space-y-3 transition-colors hover:bg-background/60 shadow-sm">
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Wifi className="h-6 w-6" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.traffic")}</p>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[15px] font-semibold text-foreground">
+                          {subParsed.trafficLimitBytes != null && subParsed.trafficLimitBytes > 0
+                            ? `${formatBytes(subParsed.trafficUsed ?? 0)} / ${formatBytes(subParsed.trafficLimitBytes)}`
+                            : t("cabinet.dashboard.unlimited")}
+                        </p>
+                        {trafficPercent != null && <span className="text-[13px] font-bold text-muted-foreground">{trafficPercent}%</span>}
+                      </div>
+                    </div>
                   </div>
                   {trafficPercent != null && (
-                    <div className="h-2.5 w-full rounded-full bg-muted/50 overflow-hidden">
-                      <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${trafficPercent}%` }} />
+                    <div className="h-2 w-full rounded-full bg-muted/30 overflow-hidden">
+                      <div className="h-full rounded-full bg-primary transition-all duration-500 ease-in-out" style={{ width: `${trafficPercent}%` }} />
                     </div>
                   )}
                 </div>
@@ -541,13 +1074,13 @@ export function ClientDashboardPage() {
         </Card>
 
         {/* Баланс + пополнение */}
-        <Card className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl shadow-lg hover:shadow-xl transition-all duration-300 flex flex-col justify-between">
+        <Card data-tour="balance" className="rounded-3xl border border-border/50 bg-card/40 backdrop-blur-xl shadow-lg hover:shadow-xl transition-all duration-300 flex flex-col justify-between">
           <CardHeader className="pb-4">
             <CardTitle className="flex items-center gap-3 text-xl text-foreground">
               <div className="p-2.5 bg-primary/20 rounded-xl">
                 <Wallet className="h-6 w-6 text-primary" />
               </div>
-              Баланс
+              {t("cabinet.dashboard.balance")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6 flex-1 flex flex-col justify-center text-center">
@@ -557,10 +1090,82 @@ export function ClientDashboardPage() {
               </p>
               <p className="text-[15px] text-muted-foreground mt-3">На счету для продления тарифов</p>
             </div>
-            <Button variant="default" size="lg" className="w-full gap-2 shadow-lg h-14 rounded-xl text-[16px] hover:scale-105 transition-transform" asChild>
-              <Link to="/cabinet/profile#topup">
-                <PlusCircle className="h-5 w-5" />
-                Пополнить баланс
+            
+            <div className="flex items-center justify-between p-4 rounded-2xl bg-background/40 border border-border/50 text-left">
+              <div className="flex flex-col min-w-0">
+                <Label className="text-[15px] font-semibold">{t("cabinet.dashboard.auto_renew")}</Label>
+                {client.autoRenewEnabled && autoRenewNext.amount != null ? (
+                  <span className="text-sm mt-0.5 inline-flex items-center gap-1.5 truncate">
+                    <RotateCcw className="h-3.5 w-3.5 text-primary shrink-0" />
+                    <span className="font-bold tabular-nums text-foreground">
+                      {autoRenewNext.amount.toLocaleString("ru-RU")} {autoRenewNext.currency === "RUB" ? "₽" : autoRenewNext.currency === "USD" ? "$" : autoRenewNext.currency}
+                    </span>
+                    {autoRenewNext.at && (
+                      <span className="text-muted-foreground">
+                        · {new Date(autoRenewNext.at).toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}
+                      </span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-sm text-muted-foreground mt-0.5">
+                    {config?.yookassaRecurringEnabled
+                      ? <>Сначала с баланса{client.yookassaPaymentMethodTitle ? <>, затем с карты <span className="font-medium">{client.yookassaPaymentMethodTitle}</span></> : ", затем с карты"}</>
+                      : "Списание с баланса"
+                    }
+                  </span>
+                )}
+              </div>
+              <Switch
+                checked={client.autoRenewEnabled ?? false}
+                disabled={autoRenewLoading}
+                onCheckedChange={toggleAutoRenew}
+              />
+            </div>
+
+            {client.autoRenewEnabled && (
+              <div className="flex items-center gap-2 p-3 pl-4 rounded-2xl bg-background/40 border border-border/50">
+                <Tag className="h-4 w-4 text-primary shrink-0" />
+                <Input
+                  value={autoRenewPromoInput}
+                  onChange={(e) => { setAutoRenewPromoInput(e.target.value.toUpperCase()); setAutoRenewPromoError(null); setAutoRenewPromoSaved(false); }}
+                  placeholder={t("cabinet.dashboard.auto_renew_promo_placeholder")}
+                  className="h-9 bg-transparent border-0 px-0 text-sm font-mono uppercase focus-visible:ring-0 placeholder:text-muted-foreground/60 shadow-none"
+                  disabled={autoRenewPromoLoading}
+                  title={t("cabinet.dashboard.auto_renew_promo_hint")}
+                />
+                {autoRenewPromoLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+                ) : autoRenewPromoSaved ? (
+                  <Check className="h-4 w-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
+                ) : client.autoRenewPromoCode && autoRenewPromoInput === client.autoRenewPromoCode ? (
+                  <button
+                    type="button"
+                    onClick={() => saveAutoRenewPromo(null)}
+                    className="h-7 w-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-red-500 dark:hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
+                    title={t("cabinet.dashboard.auto_renew_promo_remove")}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!autoRenewPromoInput.trim()}
+                    onClick={() => saveAutoRenewPromo(autoRenewPromoInput.trim())}
+                    className="h-7 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 hover:bg-primary/25 text-primary disabled:opacity-40 disabled:hover:bg-primary/15 transition-colors shrink-0"
+                  >
+                    {t("cabinet.dashboard.auto_renew_promo_save")}
+                  </button>
+                )}
+              </div>
+            )}
+            {client.autoRenewEnabled && autoRenewPromoError && (
+              <p className="text-[11px] font-medium text-red-500 dark:text-red-400 -mt-2">{autoRenewPromoError}</p>
+            )}
+
+            <Button variant="default" size="lg" className="w-full gap-2 shadow-lg h-14 rounded-xl text-[16px] hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none" asChild>
+              <Link to="/cabinet/profile#topup" className="inline-flex items-center justify-center gap-2 leading-none">
+                <PlusCircle className="h-5 w-5 shrink-0" />
+                <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.top_up")}</span>
               </Link>
             </Button>
           </CardContent>
@@ -573,7 +1178,7 @@ export function ClientDashboardPage() {
               <div className="p-2.5 bg-primary/20 rounded-xl">
                 {hasReferralLinks ? <Users className="h-6 w-6 text-primary" /> : <Wifi className="h-6 w-6 text-primary" />}
               </div>
-              {hasReferralLinks ? "Рефералы" : "Подключение"}
+              {hasReferralLinks ? t("cabinet.dashboard.referrals") : t("cabinet.dashboard.connection")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5 pt-2 flex flex-col justify-center h-[calc(100%-5rem)]">
@@ -594,8 +1199,11 @@ export function ClientDashboardPage() {
                   </div>
                 )}
                 <div className="pt-3">
-                  <Button variant="outline" className="w-full rounded-xl h-12 text-[15px] bg-background/30 hover:bg-background/60 transition-colors border-border/50" asChild>
-                     <Link to="/cabinet/referral">Подробная статистика <ArrowRight className="h-4 w-4 ml-2"/></Link>
+                  <Button variant="outline" className="w-full rounded-xl h-12 text-[15px] bg-background/30 hover:bg-background/60 transition-colors border-border/50 [&_svg]:self-center [&_span]:leading-none" asChild>
+                     <Link to="/cabinet/referral" className="inline-flex items-center justify-center gap-2 leading-none">
+                       <span className="inline-flex items-center leading-none">Подробная статистика</span>
+                       <ArrowRight className="h-4 w-4 shrink-0" />
+                     </Link>
                   </Button>
                 </div>
               </>
@@ -606,10 +1214,10 @@ export function ClientDashboardPage() {
                    <Wifi className="h-12 w-12 text-primary mx-auto mb-3 opacity-80" />
                    <p className="text-[15px] text-foreground font-medium">Всё готово к работе</p>
                 </div>
-                <Button variant="default" size="lg" className="w-full gap-2 rounded-xl shadow-lg h-14 text-[16px] hover:scale-105 transition-transform" asChild>
-                  <Link to="/cabinet/subscribe">
-                    <Wifi className="h-5 w-5" />
-                    Настроить VPN
+                <Button variant="default" size="lg" className="w-full gap-2 rounded-xl shadow-lg h-14 text-[16px] hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none" asChild>
+                  <Link to="/cabinet/subscribe" className="inline-flex items-center justify-center gap-2 leading-none">
+                    <Wifi className="h-5 w-5 shrink-0" />
+                    <span className="inline-flex items-center leading-none">Подключить VPN</span>
                   </Link>
                 </Button>
               </div>
@@ -619,14 +1227,170 @@ export function ClientDashboardPage() {
                    <Package className="h-12 w-12 text-muted-foreground mx-auto mb-3 opacity-40" />
                    <p className="text-[15px] text-muted-foreground">Оплатите тариф, чтобы получить ссылку</p>
                 </div>
-                <Button variant="outline" size="lg" className="w-full rounded-xl h-14 text-[16px] bg-background/30 hover:bg-background/60 border-border/50 transition-colors" asChild>
-                  <Link to="/cabinet/tariffs">Выбрать тариф</Link>
+                <Button variant="outline" size="lg" className="w-full rounded-xl h-14 text-[16px] bg-background/30 hover:bg-background/60 border-border/50 transition-colors [&_span]:leading-none" asChild>
+                  <Link to="/cabinet/tariffs" className="inline-flex items-center justify-center leading-none">
+                    <span className="inline-flex items-center leading-none">Выбрать тариф</span>
+                  </Link>
                 </Button>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      {secondarySubscriptions.length > 0 && (
+        <motion.section
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="space-y-4 pt-4"
+        >
+          <h2 className="flex items-center gap-2 text-xl font-bold tracking-tight text-foreground ml-1">
+            <Package className="h-6 w-6 text-indigo-400" />
+            Дополнительные подписки
+          </h2>
+          <div className="grid gap-6 sm:grid-cols-2">
+            {secondarySubscriptions.map((sec) => {
+              const secParsed = parseSubscription(sec.subscription);
+              const secHasActive = sec.subscription && typeof sec.subscription === "object" && (secParsed.status === "ACTIVE" || secParsed.status === undefined);
+              const secExpireDate = secParsed.expireAt ? new Date(secParsed.expireAt) : null;
+              const secDaysLeft = secExpireDate && secExpireDate > new Date() ? Math.max(0, Math.ceil((secExpireDate.getTime() - Date.now()) / (24*60*60*1000))) : null;
+              const secTrafficPercent = secParsed.trafficLimitBytes && secParsed.trafficLimitBytes > 0 && secParsed.trafficUsed != null ? Math.min(100, Math.round((secParsed.trafficUsed / secParsed.trafficLimitBytes) * 100)) : null;
+
+              return (
+                <Card key={sec.id} className="rounded-3xl border border-indigo-500/30 bg-card/40 backdrop-blur-xl shadow-lg hover:shadow-xl transition-all duration-300 flex flex-col">
+                  <CardHeader className="pb-4">
+                    <CardTitle className="flex items-center justify-between text-lg text-foreground">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2.5 bg-indigo-500/20 rounded-xl">
+                          <Package className="h-5 w-5 text-indigo-400" />
+                        </div>
+                        Подписка #{sec.subscriptionIndex ?? ""}
+                      </div>
+                      {secHasActive ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                          Активна
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-semibold bg-muted/30 text-muted-foreground border border-border/50">
+                          <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                          Неактивна
+                        </span>
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex-1 flex flex-col justify-center">
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 flex-wrap mb-2">
+                        {secDaysLeft != null && (
+                          <span className="text-sm font-semibold text-foreground bg-foreground/5 px-3 py-1.5 rounded-full border border-border/50 shadow-sm">
+                            {secDaysLeft} {secDaysLeft === 1 ? t("cabinet.common.day_one") : secDaysLeft < 5 ? t("cabinet.common.day_few") : t("cabinet.common.day_many")}
+                          </span>
+                        )}
+                        {secParsed.hwidDeviceLimit != null && secParsed.hwidDeviceLimit > 0 && (
+                          <span className="text-sm font-semibold text-foreground bg-indigo-500/10 text-indigo-400 px-3 py-1.5 rounded-full border border-indigo-500/20 shadow-sm flex items-center gap-1.5">
+                            <Smartphone className="h-4 w-4" /> {devicesBySubId[sec.id] ?? 0} / {secParsed.hwidDeviceLimit}
+                          </span>
+                        )}
+                      </div>
+                      
+                      {sec.tariffDisplayName && (
+                        <div className="flex items-center gap-4 bg-background/40 p-4 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                            <Package className="h-6 w-6" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.tariff_label")}</p>
+                            <p className="text-[15px] font-semibold truncate text-foreground">
+                              {sec.tariffDisplayName}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {secParsed.expireAt && (
+                        <div className="flex items-center gap-4 bg-background/40 p-4 rounded-2xl border border-border/50 transition-colors hover:bg-background/60 shadow-sm">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                            <Calendar className="h-6 w-6" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.valid_until")}</p>
+                            <p className="text-[15px] font-semibold text-foreground">
+                              {formatDate(secParsed.expireAt)}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      <div className="bg-background/40 p-4 rounded-2xl border border-border/50 space-y-3 transition-colors hover:bg-background/60 shadow-sm">
+                        <div className="flex items-center gap-4">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
+                            <Wifi className="h-6 w-6" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{t("cabinet.dashboard.traffic")}</p>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[15px] font-semibold text-foreground">
+                                {secParsed.trafficLimitBytes != null && secParsed.trafficLimitBytes > 0
+                                  ? `${formatBytes(secParsed.trafficUsed ?? 0)} / ${formatBytes(secParsed.trafficLimitBytes)}`
+                                  : t("cabinet.dashboard.unlimited")}
+                              </p>
+                              {secTrafficPercent != null && <span className="text-[13px] font-bold text-muted-foreground">{secTrafficPercent}%</span>}
+                            </div>
+                          </div>
+                        </div>
+                        {secTrafficPercent != null && (
+                          <div className="h-2 w-full rounded-full bg-muted/30 overflow-hidden">
+                            <div className="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-in-out" style={{ width: `${secTrafficPercent}%` }} />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* T-sub-link : ссылка подписки доп.подписки + копирование прямо на главной (без захода в «Подключиться»). */}
+                      {secParsed.subscriptionUrl && (
+                        <div className="flex gap-2 min-w-0 pt-1 mb-2">
+                          <code className="flex-1 min-w-0 truncate rounded-xl bg-background/50 border border-border/50 px-3 py-2.5 text-xs font-mono flex items-center text-foreground/80" title={secParsed.subscriptionUrl}>
+                            {secParsed.subscriptionUrl}
+                          </code>
+                          <Button size="icon" variant="outline" className="shrink-0 h-auto w-11 rounded-xl bg-background/50 hover:bg-background/80 transition-transform hover:scale-105" onClick={() => { navigator.clipboard.writeText(secParsed.subscriptionUrl || ""); window.Telegram?.WebApp?.showPopup?.({ title: t("cabinet.dashboard.copied_title"), message: t("cabinet.dashboard.copied_message") }); }}>
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      )}
+                      <div className="pt-2 flex flex-col gap-2">
+                        <Button variant="default" size="lg" className="w-full gap-2 rounded-xl shadow-lg h-14 text-[16px] hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none bg-indigo-600 hover:bg-indigo-700 text-white" asChild>
+                          {useRemnaPage && secParsed.subscriptionUrl ? (
+                            <a href={secParsed.subscriptionUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 leading-none">
+                              <Wifi className="h-5 w-5 shrink-0" />
+                              <span className="inline-flex items-center leading-none">Подключиться</span>
+                            </a>
+                          ) : (
+                            <Link to={`/cabinet/subscribe?uuid=${sec.remnawaveUuid}`} className="inline-flex items-center justify-center gap-2 leading-none">
+                              <Wifi className="h-5 w-5 shrink-0" />
+                              <span className="inline-flex items-center leading-none">Подключиться</span>
+                            </Link>
+                          )}
+                        </Button>
+                        {/* продлить ИМЕННО эту доп. подписку */}
+                        <Button variant="outline" size="lg" className="w-full gap-2 rounded-xl h-14 text-[16px] hover:scale-105 transition-transform border-indigo-500/30 hover:bg-indigo-500/10 [&_svg]:self-center [&_span]:leading-none" asChild>
+                          <Link to={`/cabinet/tariffs?extend=${sec.id}`} className="inline-flex items-center justify-center gap-2 leading-none">
+                            <RefreshCw className="h-5 w-5 shrink-0" />
+                            <span className="inline-flex items-center leading-none">Продлить</span>
+                          </Link>
+                        </Button>
+                      </div>
+
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        </motion.section>
+      )}
     </div>
+    {trialsPickerNode}
+    </>
   );
 }

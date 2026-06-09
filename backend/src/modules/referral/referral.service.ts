@@ -61,16 +61,28 @@ export async function distributeReferralRewards(paymentId: string): Promise<{ di
     const level2 = level1?.referrer ?? null;
     const level3 = level2?.referrer ?? null;
 
+    // v5.0.0: после выпила multi-bot реферальный бонус считается от amount
+    // (раньше использовалось baseAmount = amount без наценки клона).
     const amount = payment.amount;
     const updates: { clientId: string; bonus: number; level: number }[] = [];
-    if (level1 && !level1.isBlocked && p1 > 0) {
-      updates.push({ clientId: level1.id, bonus: Math.round(amount * (p1 / 100) * 100) / 100, level: 1 });
+    // ВНИМАНИЕ: Client.referralPercent — это индивидуальный override клиента
+    // как реферера ПЕРВОГО уровня (т.е. процент с его прямых рефералов).
+    // Для 2/3 уровня этот override НЕ применяется — там всегда глобальный
+    // дефолт из SystemConfig.referralPercentLevel2 / referralPercentLevel3.
+    // Раньше тут было `level2?.referralPercent ?? p2` — это давало бонус
+    // 2 уровня по проценту 1-го уровня (если у промежуточного реферера
+    // стоял VIP-override). См. отчёт пользователя 14.05.2026.
+    const pct1 = level1?.referralPercent ?? p1;
+    const pct2 = p2;
+    const pct3 = p3;
+    if (level1 && !level1.isBlocked && pct1 > 0) {
+      updates.push({ clientId: level1.id, bonus: Math.round(amount * (pct1 / 100) * 100) / 100, level: 1 });
     }
-    if (level2 && !level2.isBlocked && p2 > 0) {
-      updates.push({ clientId: level2.id, bonus: Math.round(amount * (p2 / 100) * 100) / 100, level: 2 });
+    if (level2 && !level2.isBlocked && pct2 > 0) {
+      updates.push({ clientId: level2.id, bonus: Math.round(amount * (pct2 / 100) * 100) / 100, level: 2 });
     }
-    if (level3 && !level3.isBlocked && p3 > 0) {
-      updates.push({ clientId: level3.id, bonus: Math.round(amount * (p3 / 100) * 100) / 100, level: 3 });
+    if (level3 && !level3.isBlocked && pct3 > 0) {
+      updates.push({ clientId: level3.id, bonus: Math.round(amount * (pct3 / 100) * 100) / 100, level: 3 });
     }
 
     for (const { clientId, bonus, level } of updates) {

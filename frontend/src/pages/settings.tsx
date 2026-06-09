@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/contexts/auth";
-import { api, type AdminSettings, type SyncResult, type SyncToRemnaResult, type SyncCreateRemnaForMissingResult, type SubscriptionPageConfig } from "@/lib/api";
+import { api, type AdminSettings, type AutoRenewStats, type SyncResult, type SyncToRemnaResult, type SyncCreateRemnaForMissingResult, type SubscriptionPageConfig, type SshConfig } from "@/lib/api";
 import { SubscriptionPageEditor } from "@/components/subscription-page-editor";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,16 +11,45 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { RefreshCw, Download, Upload, Link2, Settings2, Gift, Users, ArrowLeftRight, Mail, MessageCircle, CreditCard, ChevronDown, Copy, Check, Bot, FileJson, Palette, Wallet, Package, Plus, Trash2 } from "lucide-react";
+import { Download, Upload, Link2, Settings2, Gift, Users, ArrowLeftRight, Mail, MessageCircle, CreditCard, ChevronDown, ChevronUp, Copy, Check, Bot, FileJson, Palette, Wallet, Package, Plus, Trash2, KeyRound, Loader2, Sparkles, Layers, Globe, BarChart3, RotateCw, Shield, Terminal, FileText, MapPin, GripVertical, Smile, Sliders, MessageSquare, Eye, Megaphone, Trash, Bell, Send, Building, Languages as LanguagesIcon, Network } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ACCENT_PALETTES } from "@/contexts/theme";
 import { Switch } from "@/components/ui/switch";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { MarketplaceSettingsCard } from "@/pages/marketplace/marketplace-settings-card";
+// drag-n-drop кнопок главного меню.
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
-const ALLOWED_LANGS = ["ru", "en"];
+const FALLBACK_LANGS = ["ru", "en"];
+const LANG_NAMES: Record<string, string> = {
+  ru: "Русский",
+  en: "English",
+  uk: "Українська",
+  be: "Беларуская",
+  kz: "Қазақша",
+  kk: "Қазақша",
+  uz: "Oʻzbekcha",
+  de: "Deutsch",
+  fr: "Français",
+  es: "Español",
+  pt: "Português",
+  it: "Italiano",
+  pl: "Polski",
+  tr: "Türkçe",
+  zh: "中文",
+  ja: "日本語",
+  ko: "한국어",
+  ar: "العربية",
+  hi: "हिन्दी",
+  fa: "فارسی",
+};
 const ALLOWED_CURRENCIES = ["usd", "rub"];
 
 const DEFAULT_PLATEGA_METHODS: { id: number; enabled: boolean; label: string }[] = [
-  { id: 2, enabled: true, label: "СПБ" },
+  { id: 2, enabled: true, label: "СБП" },
   { id: 11, enabled: false, label: "Карты" },
   { id: 12, enabled: false, label: "Международный" },
   { id: 13, enabled: false, label: "Криптовалюта" },
@@ -26,7 +57,7 @@ const DEFAULT_PLATEGA_METHODS: { id: number; enabled: boolean; label: string }[]
 
 type BotButtonItem = { id: string; visible: boolean; label: string; order: number; style?: string; emojiKey?: string; onePerRow?: boolean };
 const DEFAULT_BOT_BUTTONS: BotButtonItem[] = [
-  { id: "tariffs", visible: true, label: "📦 Тарифы", order: 0, style: "success", emojiKey: "PACKAGE" },
+  { id: "tariffs", visible: true, label: "💳 Купить доступ / Продлить", order: 2, style: "" },
   { id: "proxy", visible: true, label: "🌐 Прокси", order: 0.5, style: "primary", emojiKey: "SERVERS" },
   { id: "my_proxy", visible: true, label: "📋 Мои прокси", order: 0.6, style: "primary", emojiKey: "SERVERS" },
   { id: "singbox", visible: true, label: "🔑 Доступы", order: 0.55, style: "primary", emojiKey: "SERVERS" },
@@ -41,10 +72,15 @@ const DEFAULT_BOT_BUTTONS: BotButtonItem[] = [
   { id: "tickets", visible: true, label: "🎫 Тикеты", order: 6.5, style: "primary", emojiKey: "NOTE" },
   { id: "support", visible: true, label: "🆘 Поддержка", order: 7, style: "primary", emojiKey: "NOTE" },
   { id: "promocode", visible: true, label: "🎟️ Промокод", order: 8, style: "primary", emojiKey: "STAR" },
+  { id: "gift", visible: true, label: "🎁 Подарки", order: 8.5, style: "primary", emojiKey: "TRIAL" },
   { id: "extra_options", visible: true, label: "➕ Доп. опции", order: 9, style: "primary", emojiKey: "PACKAGE" },
+  // Кастомные кнопки. Используются в главном меню.
+  { id: "my_subs", visible: true, label: "📋 Мои подписки", order: 3, style: "", onePerRow: true },
+  { id: "tg_proxy", visible: true, label: "🛡 Бесплатный Прокси для Telegram", order: 8, style: "", onePerRow: true },
+  { id: "site", visible: true, label: "🌐 Сайт", order: 10, style: "", onePerRow: true },
 ];
 
-const BOT_EMOJI_KEYS = ["HEADER", "MAIN_MENU", "STATUS", "BALANCE", "TARIFFS", "PACKAGE", "PROFILE", "CARD", "TRIAL", "LINK", "SERVERS", "BACK", "PUZZLE", "DATE", "TIME", "TRAFFIC", "ACTIVE_GREEN", "ACTIVE_YELLOW", "INACTIVE", "CONNECT", "NOTE", "STAR", "CROWN", "DURATION", "DEVICES", "LOCATION", "CUSTOM_1", "CUSTOM_2", "CUSTOM_3", "CUSTOM_4", "CUSTOM_5"] as const;
+const BOT_EMOJI_KEYS = ["HEADER", "MAIN_MENU", "STATUS", "BALANCE", "TARIFFS", "PACKAGE", "PROFILE", "CARD", "TRIAL", "LINK", "SERVERS", "BACK", "BACK_TO_SUB", "BACK_TO_SUBS_LIST", "PUZZLE", "DATE", "TIME", "TRAFFIC", "ACTIVE_GREEN", "ACTIVE_YELLOW", "INACTIVE", "CONNECT", "NOTE", "STAR", "CROWN", "DURATION", "DEVICES", "LOCATION", "CUSTOM_1", "CUSTOM_2", "CUSTOM_3", "CUSTOM_4", "CUSTOM_5"] as const;
 
 const DEFAULT_BOT_MENU_TEXTS: Record<string, string> = {
   welcomeTitlePrefix: "🛡 ",
@@ -146,27 +182,259 @@ const BOT_MENU_TEXT_LABELS: Record<string, string> = {
   chooseAction: "Призыв к действию",
 };
 
+/** Человеко-читаемые описания emoji-ключей для админки (вместо технических HEADER, BALANCE и т.п.). */
+const BOT_EMOJI_LABELS: Record<string, string> = {
+  HEADER: "Заголовок главного меню",
+  MAIN_MENU: "Иконка «Главное меню»",
+  STATUS: "Статус подписки",
+  BALANCE: "Баланс",
+  TARIFFS: "Раздел «Тарифы»",
+  PACKAGE: "Пакет / Тариф",
+  PROFILE: "Профиль",
+  CARD: "Оплата / Карта",
+  TRIAL: "Триал / Подарок",
+  LINK: "Ссылка / Реферал",
+  SERVERS: "VPN / Серверы",
+  BACK: "Кнопка «Назад»",
+  BACK_TO_SUB: "Кнопка «К подписке»",
+  BACK_TO_SUBS_LIST: "Кнопка «К списку подписок»",
+  PUZZLE: "Меню профиля",
+  DATE: "Дата окончания",
+  TIME: "Осталось дней",
+  TRAFFIC: "Трафик",
+  ACTIVE_GREEN: "Активно (зелёный)",
+  ACTIVE_YELLOW: "Ограничено (жёлтый)",
+  INACTIVE: "Неактивно (серый)",
+  CONNECT: "Подключение",
+  NOTE: "Поддержка / Заметка",
+  STAR: "Промокод / Звезда",
+  CROWN: "Премиум / Корона",
+  DURATION: "Длительность",
+  DEVICES: "Устройства",
+  LOCATION: "Локация",
+  CUSTOM_1: "Свой эмодзи №1",
+  CUSTOM_2: "Свой эмодзи №2",
+  CUSTOM_3: "Свой эмодзи №3",
+  CUSTOM_4: "Свой эмодзи №4",
+  CUSTOM_5: "Свой эмодзи №5",
+};
+
+/** Опции стилей кнопок с цветовыми превью. Внутренние ID-стили примерно одинаковы в TG. */
+const BOT_STYLE_OPTIONS: { value: string; label: string; swatch: string }[] = [
+  { value: "", label: "По умолчанию", swatch: "bg-muted" },
+  { value: "primary", label: "Синий", swatch: "bg-blue-500" },
+  { value: "success", label: "Зелёный", swatch: "bg-emerald-500" },
+  { value: "danger", label: "Красный", swatch: "bg-red-500" },
+];
+
+/** Человеко-читаемые имена кнопок главного меню по их id (для подсказок справа от ввода). */
+const BOT_BUTTON_HUMAN_NAMES: Record<string, string> = {
+  tariffs: "Список тарифов VPN",
+  proxy: "Прокси-тарифы",
+  my_proxy: "Мои прокси-доступы",
+  singbox: "Singbox-доступы",
+  my_singbox: "Мои singbox-доступы",
+  profile: "Профиль клиента",
+  devices: "Управление устройствами",
+  topup: "Пополнение баланса",
+  referral: "Реферальная программа",
+  trial: "Бесплатный триал",
+  vpn: "Подключение к VPN",
+  cabinet: "Открыть веб-кабинет",
+  tickets: "Тикеты поддержки",
+  support: "Связь с поддержкой",
+  promocode: "Ввод промокода",
+  gift: "Подарочные коды",
+  extra_options: "Доп. опции (трафик, устройства)",
+};
+
+/** Подсказки к текстам экранов бота: где это используется и какие переменные доступны. */
+const BOT_INNER_STYLE_LABELS: Record<string, { label: string; desc: string }> = {
+  tariffPay: { label: "Кнопка оплаты тарифа", desc: "Цвет кнопки выбора тарифа в списке" },
+  topup: { label: "Кнопка пополнения", desc: "Цвет на экране пополнения баланса" },
+  back: { label: "Кнопка «Назад»", desc: "Возврат в предыдущее меню" },
+  profile: { label: "Кнопка профиля", desc: "Кнопки внутри экрана профиля" },
+  trialConfirm: { label: "Подтверждение триала", desc: "Подтверждение активации триала" },
+  lang: { label: "Выбор языка", desc: "Кнопки выбора языка интерфейса" },
+  currency: { label: "Выбор валюты", desc: "Кнопки выбора валюты" },
+};
+
+/**
+ * Кнопка-загрузчик офферов из Lava.top.
+ * Дёргает /api/admin/lavatop/products, показывает список с offer ID и ценами.
+ * Каждый offer ID можно скопировать в один клик.
+ */
+function LavatopOffersBrowser() {
+  type Offer = {
+    offerId: string;
+    offerName: string;
+    offerDescription?: string;
+    productId: string;
+    productTitle: string;
+    productType: string;
+    prices: { currency: string; amount: number; periodicity: string }[];
+  };
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [offers, setOffers] = useState<Offer[] | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/admin/lavatop/products", {
+        credentials: "include",
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.message || `HTTP ${r.status}`);
+      setOffers(data.offers as Offer[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyId(id: string) {
+    try { await navigator.clipboard.writeText(id); } catch { /* ignore */ }
+    setCopiedId(id);
+    setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1500);
+  }
+
+  return (
+    <div className="mt-4 pt-4 border-t border-dashed">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h5 className="text-sm font-semibold">Офферы в твоём Lava.top кабинете</h5>
+          <p className="text-xs text-muted-foreground">Скопируй offer ID и вставь в поле «Lava.top Offer ID» нужного тарифа.</p>
+        </div>
+        <Button type="button" size="sm" onClick={load} disabled={loading}>
+          {loading ? "Загружаю…" : (offers ? "Обновить" : "Показать офферы")}
+        </Button>
+      </div>
+      {error && (
+        <div className="text-xs rounded-md border border-red-300/50 bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 p-2 mb-2">
+          ❌ {error}
+        </div>
+      )}
+      {offers && offers.length === 0 && (
+        <p className="text-xs text-muted-foreground">У тебя нет ни одного оффера в кабинете Lava.top. Создай продукт + оффер на developers.lava.top.</p>
+      )}
+      {offers && offers.length > 0 && (
+        <div className="grid gap-2">
+          {offers.map((o) => {
+            const isCopied = copiedId === o.offerId;
+            return (
+              <div key={o.offerId} className="rounded-lg border border-white/10 bg-background/40 p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold truncate">{o.offerName || "(без названия)"}</div>
+                    <div className="text-muted-foreground text-[10px] truncate">{o.productTitle} · {o.productType}</div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={isCopied ? "default" : "outline"}
+                    onClick={() => copyId(o.offerId)}
+                    className="shrink-0"
+                  >
+                    {isCopied ? "✓ Copied" : "Copy ID"}
+                  </Button>
+                </div>
+                <div className="font-mono text-[11px] break-all text-primary">{o.offerId}</div>
+                {o.prices.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {o.prices.map((p, i) => (
+                      <span key={i} className="rounded-md bg-primary/10 border border-primary/20 px-2 py-0.5">
+                        {p.amount} {p.currency} · {p.periodicity}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
-  const { state } = useAuth();
+  const { t } = useTranslation();
+  const { state, updateAdmin } = useAuth();
   const [settings, setSettings] = useState<AdminSettings | null>(null);
+  const [twoFaEnableOpen, setTwoFaEnableOpen] = useState(false);
+  const [twoFaDisableOpen, setTwoFaDisableOpen] = useState(false);
+  const [twoFaSetupData, setTwoFaSetupData] = useState<{ secret: string; otpauthUrl: string } | null>(null);
+  const [twoFaStep, setTwoFaStep] = useState<1 | 2>(1);
+  const [twoFaCode, setTwoFaCode] = useState("");
+  const [twoFaLoading, setTwoFaLoading] = useState(false);
+  const [twoFaError, setTwoFaError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [sshConfig, setSshConfig] = useState<SshConfig | null>(null);
+  const [sshSaving, setSshSaving] = useState(false);
+  const [sshMessage, setSshMessage] = useState("");
   const [syncLoading, setSyncLoading] = useState<"from" | "to" | "missing" | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [squads, setSquads] = useState<{ uuid: string; name?: string }[]>([]);
   const [activeTab, setActiveTab] = useState("general");
+  const [botSubTab, setBotSubTab] = useState<"menu" | "texts" | "emoji" | "behavior" | "links">("menu");
+  const [installedLangCodes, setInstalledLangCodes] = useState<string[]>(FALLBACK_LANGS);
   const [plategaCallbackCopied, setPlategaCallbackCopied] = useState(false);
   const [yoomoneyWebhookCopied, setYoomoneyWebhookCopied] = useState(false);
   const [yookassaWebhookCopied, setYookassaWebhookCopied] = useState(false);
+  const [cryptopayWebhookCopied, setCryptopayWebhookCopied] = useState(false);
+  const [heleketWebhookCopied, setHeleketWebhookCopied] = useState(false);
+  const [lavaWebhookCopied, setLavaWebhookCopied] = useState(false);
+  const [overpayWebhookCopied, setOverpayWebhookCopied] = useState(false);
   const [defaultSubpageConfig, setDefaultSubpageConfig] = useState<SubscriptionPageConfig | null>(null);
+  const [autoRenewStats, setAutoRenewStats] = useState<AutoRenewStats | null>(null);
+  const defaultJourneySteps = [
+    { title: "Выбираешь сценарий", desc: "Доступны гибкие тарифы: выбери то, что подходит именно тебе, без переплат." },
+    { title: "Оплачиваешь как удобно", desc: "Карта, СБП, крипта — выбирай любой удобный и безопасный метод оплаты." },
+    { title: "Подключаешься без боли", desc: "После оплаты бот или личный кабинет сразу выдадут все инструкции. Настройка за 1 минуту." },
+  ];
+  const defaultSignalCards = [
+    { eyebrow: "privacy core", title: "Zero-log и аккуратная защита", desc: "Не ощущается как странный хак: нормальный продуктовый слой, чистый доступ и понятный контроль." },
+    { eyebrow: "global access", title: "Нужные сервисы открываются без драмы", desc: "Маршруты и сценарии уже собраны под реальные поездки, работу и привычные повседневные задачи." },
+    { eyebrow: "payments sync", title: "Оплата встроена в общий сценарий", desc: "Не отдельная форма из девяностых, а часть единого опыта: выбрал, оплатил, сразу подключился." },
+  ];
+  const defaultTrustPoints = ["Современные протоколы шифрования", "Строгая политика Zero-Log: мы не храним данные", "Высокая пропускная способность без ограничений"];
+  const defaultExperiencePanels = [
+    { title: "Никаких зависаний", desc: "Смотри видео в 4K, играй в игры и работай без задержек." },
+    { title: "Мгновенное подключение", desc: "Достаточно нажать одну кнопку, чтобы оказаться в защищенной сети." },
+    { title: "Удобный кабинет", desc: "Управляй подпиской, устройствами и получай поддержку в пару кликов." },
+  ];
+  const defaultDevicesList = ["Windows", "macOS", "iPhone / iPad", "Android", "Linux"];
+  const defaultQuickStartList = ["Мгновенный доступ после оплаты", "Подробные инструкции и техподдержка", "Удобный личный кабинет в Telegram"];
+  const [landingJourneySteps, setLandingJourneySteps] = useState<{ title: string; desc: string }[]>(defaultJourneySteps);
+  const [landingSignalCards, setLandingSignalCards] = useState<{ eyebrow: string; title: string; desc: string }[]>(defaultSignalCards);
+  const [landingTrustPoints, setLandingTrustPoints] = useState<string[]>(defaultTrustPoints);
+  const [landingExperiencePanels, setLandingExperiencePanels] = useState<{ title: string; desc: string }[]>(defaultExperiencePanels);
+  const [landingDevicesList, setLandingDevicesList] = useState<string[]>(defaultDevicesList);
+  const [landingQuickStartList, setLandingQuickStartList] = useState<string[]>(defaultQuickStartList);
   const token = state.accessToken!;
 
   useEffect(() => {
+    let cancelled = false;
+    api.getLanguages(token).then((res) => {
+      if (cancelled || !res?.ok) return;
+      const codes = Array.from(new Set<string>(["ru", ...res.languages.map((l) => l.code)]));
+      setInstalledLangCodes(codes);
+    }).catch(() => { /* keep fallback */ });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  useEffect(() => {
     api.getSettings(token).then((data) => {
+      const allowed = installedLangCodes;
       setSettings({
         ...data,
-        activeLanguages: (data.activeLanguages || []).filter((l: string) => ALLOWED_LANGS.includes(l)),
+        activeLanguages: (data.activeLanguages || []).filter((l: string) => allowed.includes(l)),
         activeCurrencies: (data.activeCurrencies || []).filter((c: string) => ALLOWED_CURRENCIES.includes(c)),
         defaultReferralPercent: data.defaultReferralPercent ?? 30,
         referralPercentLevel2: (data as AdminSettings).referralPercentLevel2 ?? 10,
@@ -183,6 +451,7 @@ export function SettingsPage() {
         botButtonsPerRow: (data as AdminSettings).botButtonsPerRow ?? 1,
         botEmojis: (data as AdminSettings).botEmojis ?? {},
         botBackLabel: (data as AdminSettings).botBackLabel ?? "◀️ В меню",
+        botDevicesText: (data as AdminSettings).botDevicesText ?? "",
         botMenuTexts: { ...DEFAULT_BOT_MENU_TEXTS, ...((data as AdminSettings).botMenuTexts ?? {}) },
         botMenuLineVisibility: { ...DEFAULT_BOT_MENU_LINE_VISIBILITY, ...((data as AdminSettings).botMenuLineVisibility ?? {}) },
         botTariffsText: (data as AdminSettings).botTariffsText ?? DEFAULT_BOT_TARIFFS_TEXT,
@@ -197,9 +466,34 @@ export function SettingsPage() {
         subscriptionPageConfig: (data as AdminSettings).subscriptionPageConfig ?? null,
         supportLink: (data as AdminSettings).supportLink ?? "",
         agreementLink: (data as AdminSettings).agreementLink ?? "",
+        referralInstructionsUrl: (data as AdminSettings).referralInstructionsUrl ?? "",
         offerLink: (data as AdminSettings).offerLink ?? "",
         instructionsLink: (data as AdminSettings).instructionsLink ?? "",
+        // T11 (11.05.2026): — Политика возврата.
+        refundLink: (data as AdminSettings & { refundLink?: string | null }).refundLink ?? "",
+        // Текст экрана «⭕ Помощь» (большой rich-text «цели/приоритеты»).
+        helpIntroText: (data as AdminSettings & { helpIntroText?: string | null }).helpIntroText ?? "",
+        // настройки экрана «🛡 Бесплатный Прокси для Telegram».
+        tgProxyText: (data as AdminSettings).tgProxyText ?? "",
+        tgProxyUrlPrimary: (data as AdminSettings).tgProxyUrlPrimary ?? "",
+        tgProxyUrlBackup: (data as AdminSettings).tgProxyUrlBackup ?? "",
+        // динамический список TG-прокси. Бэк уже отдаёт
+        // распарсенный массив (см. client.service.ts → tgProxyServers).
+        // Если массив пуст И есть legacy primary/backup — мигрируем их в массив
+        // (one-time, при следующем сохранении уйдут только в новый формат).
+        tgProxyServers: (() => {
+          const fromApi = (data as AdminSettings).tgProxyServers;
+          if (Array.isArray(fromApi) && fromApi.length > 0) return fromApi;
+          // Migrate legacy primary/backup → массив, чтобы UI сразу показал данные.
+          const out: { flag: string; name: string; url: string }[] = [];
+          const p = (data as AdminSettings).tgProxyUrlPrimary?.trim();
+          const b = (data as AdminSettings).tgProxyUrlBackup?.trim();
+          if (p) out.push({ flag: "🇳🇱", name: "Нидерланды", url: p });
+          if (b) out.push({ flag: "🇩🇪", name: "Германия", url: b });
+          return out;
+        })(),
         ticketsEnabled: (data as AdminSettings).ticketsEnabled ?? false,
+        aiChatEnabled: (data as AdminSettings).aiChatEnabled !== false,
         sellOptionsEnabled: (data as AdminSettings).sellOptionsEnabled ?? false,
         sellOptionsTrafficEnabled: (data as AdminSettings).sellOptionsTrafficEnabled ?? false,
         sellOptionsTrafficProducts: (data as AdminSettings).sellOptionsTrafficProducts ?? [],
@@ -207,9 +501,81 @@ export function SettingsPage() {
         sellOptionsDevicesProducts: (data as AdminSettings).sellOptionsDevicesProducts ?? [],
         sellOptionsServersEnabled: (data as AdminSettings).sellOptionsServersEnabled ?? false,
         sellOptionsServersProducts: (data as AdminSettings).sellOptionsServersProducts ?? [],
+        giftSubscriptionsEnabled: (data as AdminSettings).giftSubscriptionsEnabled ?? false,
+        giftCodeExpiryHours: (data as AdminSettings).giftCodeExpiryHours ?? 72,
+        maxAdditionalSubscriptions: (data as AdminSettings).maxAdditionalSubscriptions ?? 5,
+        giftCodeFormatLength: (data as AdminSettings).giftCodeFormatLength ?? 12,
+        giftRateLimitPerMinute: (data as AdminSettings).giftRateLimitPerMinute ?? 5,
+        giftExpiryNotificationDays: (data as AdminSettings).giftExpiryNotificationDays ?? 3,
+        giftReferralEnabled: (data as AdminSettings).giftReferralEnabled ?? true,
+        giftMessageMaxLength: (data as AdminSettings).giftMessageMaxLength ?? 200,
       });
     }).finally(() => setLoading(false));
+    api.getAutoRenewStats(token).then(setAutoRenewStats).catch(() => {});
+    api.getSshConfig(token).then(setSshConfig).catch(() => {});
   }, [token]);
+
+  useEffect(() => {
+    if (!settings) return;
+    try {
+      const raw = (settings as { landingJourneyStepsJson?: string | null }).landingJourneyStepsJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a) && a.length >= 1) {
+          setLandingJourneySteps(a.slice(0, 3).map((x: unknown) => ({
+            title: typeof (x as { title?: string }).title === "string" ? (x as { title: string }).title : "",
+            desc: typeof (x as { desc?: string }).desc === "string" ? (x as { desc: string }).desc : "",
+          })));
+        }
+      }
+    } catch { /* keep default */ }
+    try {
+      const raw = (settings as { landingSignalCardsJson?: string | null }).landingSignalCardsJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a) && a.length >= 1) {
+          setLandingSignalCards(a.slice(0, 3).map((x: unknown) => ({
+            eyebrow: typeof (x as { eyebrow?: string }).eyebrow === "string" ? (x as { eyebrow: string }).eyebrow : "",
+            title: typeof (x as { title?: string }).title === "string" ? (x as { title: string }).title : "",
+            desc: typeof (x as { desc?: string }).desc === "string" ? (x as { desc: string }).desc : "",
+          })));
+        }
+      }
+    } catch { /* keep default */ }
+    try {
+      const raw = (settings as { landingTrustPointsJson?: string | null }).landingTrustPointsJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a)) setLandingTrustPoints(a.slice(0, 5).map((x) => String(x)));
+      }
+    } catch { /* keep default */ }
+    try {
+      const raw = (settings as { landingExperiencePanelsJson?: string | null }).landingExperiencePanelsJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a) && a.length >= 1) {
+          setLandingExperiencePanels(a.slice(0, 3).map((x: unknown) => ({
+            title: typeof (x as { title?: string }).title === "string" ? (x as { title: string }).title : "",
+            desc: typeof (x as { desc?: string }).desc === "string" ? (x as { desc: string }).desc : "",
+          })));
+        }
+      }
+    } catch { /* keep default */ }
+    try {
+      const raw = (settings as { landingDevicesListJson?: string | null }).landingDevicesListJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a)) setLandingDevicesList(a.slice(0, 8).map((x: unknown) => (typeof (x as { name?: string }).name === "string" ? (x as { name: string }).name : String(x))));
+      }
+    } catch { /* keep default */ }
+    try {
+      const raw = (settings as { landingQuickStartJson?: string | null }).landingQuickStartJson;
+      if (raw?.trim()) {
+        const a = JSON.parse(raw) as unknown;
+        if (Array.isArray(a)) setLandingQuickStartList(a.slice(0, 5).map((x) => String(x)));
+      }
+    } catch { /* keep default */ }
+  }, [settings?.landingJourneyStepsJson, settings?.landingSignalCardsJson, settings?.landingTrustPointsJson, settings?.landingExperiencePanelsJson, settings?.landingDevicesListJson, settings?.landingQuickStartJson]);
 
   useEffect(() => {
     if (activeTab === "subpage") {
@@ -232,11 +598,11 @@ export function SettingsPage() {
       const r: SyncResult = await api.syncFromRemna(token);
       setSyncMessage(
         r.ok
-          ? `Из Remna: создано ${r.created}, обновлено ${r.updated}, пропущено ${r.skipped}`
-          : `Ошибки: ${r.errors.join("; ")}`
+          ? t("admin.settings.sync_from_result", { created: r.created, updated: r.updated, skipped: r.skipped })
+          : t("admin.settings.sync_errors", { errors: r.errors.join("; ") })
       );
     } catch (e) {
-      setSyncMessage(e instanceof Error ? e.message : "Ошибка синхронизации");
+      setSyncMessage(e instanceof Error ? e.message : t("admin.settings.sync_error"));
     } finally {
       setSyncLoading(null);
     }
@@ -248,13 +614,13 @@ export function SettingsPage() {
     try {
       const r: SyncToRemnaResult = await api.syncToRemna(token);
       const parts: string[] = [];
-      if (r.updated > 0) parts.push(`Обновлено: ${r.updated}`);
-      if (r.unlinked > 0) parts.push(`Отвязано (не найдены в Remna): ${r.unlinked}`);
-      const successMsg = parts.length > 0 ? parts.join(". ") : "Нет изменений";
-      const msg = r.ok ? successMsg : (r.errors.length > 0 ? `Ошибки: ${r.errors.join("; ")}` : "") + (r.unlinked > 0 ? (r.errors.length ? ". " : "") + `Отвязано: ${r.unlinked}` : "");
+      if (r.updated > 0) parts.push(`${t("admin.settings.sync_updated")}: ${r.updated}`);
+      if (r.unlinked > 0) parts.push(`${t("admin.settings.sync_unlinked")}: ${r.unlinked}`);
+      const successMsg = parts.length > 0 ? parts.join(". ") : t("admin.settings.sync_no_changes");
+      const msg = r.ok ? successMsg : (r.errors.length > 0 ? `${t("admin.settings.error")}: ${r.errors.join("; ")}` : "") + (r.unlinked > 0 ? (r.errors.length ? ". " : "") + `${t("admin.settings.sync_unlinked")}: ${r.unlinked}` : "");
       setSyncMessage(msg || successMsg);
     } catch (e) {
-      setSyncMessage(e instanceof Error ? e.message : "Ошибка синхронизации");
+      setSyncMessage(e instanceof Error ? e.message : t("admin.settings.sync_error"));
     } finally {
       setSyncLoading(null);
     }
@@ -267,13 +633,79 @@ export function SettingsPage() {
       const r: SyncCreateRemnaForMissingResult = await api.syncCreateRemnaForMissing(token);
       setSyncMessage(
         r.ok
-          ? `Привязано: создано в Remna ${r.created}, привязано существующих ${r.linked}`
-          : `Ошибки: ${r.errors.join("; ")}`
+          ? `${t("admin.settings.sync_created")}: ${r.created}, ${t("admin.settings.sync_linked")}: ${r.linked}`
+          : `${t("admin.settings.error")}: ${r.errors.join("; ")}`
       );
     } catch (e) {
-      setSyncMessage(e instanceof Error ? e.message : "Ошибка");
+      setSyncMessage(e instanceof Error ? e.message : t("admin.settings.error"));
     } finally {
       setSyncLoading(null);
+    }
+  }
+
+  async function openTwoFaEnable() {
+    setTwoFaError(null);
+    setTwoFaSetupData(null);
+    setTwoFaStep(1);
+    setTwoFaCode("");
+    setTwoFaEnableOpen(true);
+    setTwoFaLoading(true);
+    try {
+      const data = await api.admin2FASetup(token);
+      setTwoFaSetupData(data);
+    } catch (e) {
+      setTwoFaError(e instanceof Error ? e.message : t("admin.settings.error"));
+    } finally {
+      setTwoFaLoading(false);
+    }
+  }
+  function closeTwoFaEnable() {
+    setTwoFaEnableOpen(false);
+    setTwoFaSetupData(null);
+    setTwoFaStep(1);
+    setTwoFaCode("");
+    setTwoFaError(null);
+  }
+  async function confirmTwoFaEnable() {
+    if (!twoFaCode.trim() || twoFaCode.length !== 6) {
+      setTwoFaError(t("admin.settings.2fa_enter_code_error"));
+      return;
+    }
+    setTwoFaError(null);
+    setTwoFaLoading(true);
+    try {
+      await api.admin2FAConfirm(token, twoFaCode.trim());
+      const admin = await api.getMe(token);
+      updateAdmin(admin);
+      closeTwoFaEnable();
+    } catch (e) {
+      setTwoFaError(e instanceof Error ? e.message : t("admin.settings.2fa_invalid_code"));
+    } finally {
+      setTwoFaLoading(false);
+    }
+  }
+  async function openTwoFaDisable() {
+    setTwoFaDisableOpen(true);
+    setTwoFaCode("");
+    setTwoFaError(null);
+  }
+  async function confirmTwoFaDisable() {
+    if (!twoFaCode.trim() || twoFaCode.length !== 6) {
+      setTwoFaError(t("admin.settings.2fa_enter_code_error"));
+      return;
+    }
+    setTwoFaError(null);
+    setTwoFaLoading(true);
+    try {
+      await api.admin2FADisable(token, twoFaCode.trim());
+      const admin = await api.getMe(token);
+      updateAdmin(admin);
+      setTwoFaDisableOpen(false);
+      setTwoFaCode("");
+    } catch (e) {
+      setTwoFaError(e instanceof Error ? e.message : t("admin.settings.2fa_invalid_code"));
+    } finally {
+      setTwoFaLoading(false);
     }
   }
 
@@ -294,9 +726,9 @@ export function SettingsPage() {
       const updated = await api.updateSettings(token, payload);
       const u = updated as AdminSettings;
       setSettings((prev) => (prev ? { ...prev, ...u } : prev));
-      setMessage("Настройки опций сохранены");
+      setMessage(t("admin.settings.saved"));
     } catch {
-      setMessage("Ошибка сохранения");
+      setMessage(t("admin.settings.save_error"));
     } finally {
       setSaving(false);
     }
@@ -307,13 +739,14 @@ export function SettingsPage() {
     if (!settings) return;
     setSaving(true);
     setMessage("");
-    const langs = Array.isArray(settings.activeLanguages) ? settings.activeLanguages.filter((l) => ALLOWED_LANGS.includes(l)) : ALLOWED_LANGS;
+    const allowedLangs = installedLangCodes.length ? installedLangCodes : FALLBACK_LANGS;
+    const langs = Array.isArray(settings.activeLanguages) ? settings.activeLanguages.filter((l) => allowedLangs.includes(l)) : allowedLangs;
     const currs = Array.isArray(settings.activeCurrencies) ? settings.activeCurrencies.filter((c) => ALLOWED_CURRENCIES.includes(c)) : ALLOWED_CURRENCIES;
-    const defaultLang = (settings.defaultLanguage && ALLOWED_LANGS.includes(settings.defaultLanguage) ? settings.defaultLanguage : langs[0]) ?? "ru";
+    const defaultLang = (settings.defaultLanguage && allowedLangs.includes(settings.defaultLanguage) ? settings.defaultLanguage : langs[0]) ?? "ru";
     const defaultCurr = (settings.defaultCurrency && ALLOWED_CURRENCIES.includes(settings.defaultCurrency) ? settings.defaultCurrency : currs[0]) ?? "usd";
     api
       .updateSettings(token, {
-        activeLanguages: langs.length ? langs.join(",") : ALLOWED_LANGS.join(","),
+        activeLanguages: langs.length ? langs.join(",") : allowedLangs.join(","),
         activeCurrencies: currs.length ? currs.join(",") : ALLOWED_CURRENCIES.join(","),
         defaultLanguage: defaultLang,
         defaultCurrency: defaultCurr,
@@ -328,6 +761,7 @@ export function SettingsPage() {
         logo: settings.logo ?? null,
         logoBot: settings.logoBot ?? null,
         favicon: settings.favicon ?? null,
+        cabinetDesign: settings.cabinetDesign ?? undefined,
         remnaClientUrl: settings.remnaClientUrl ?? null,
         smtpHost: settings.smtpHost ?? null,
         smtpPort: settings.smtpPort ?? undefined,
@@ -336,24 +770,74 @@ export function SettingsPage() {
         smtpPassword: settings.smtpPassword && settings.smtpPassword !== "********" ? settings.smtpPassword : undefined,
         smtpFromEmail: settings.smtpFromEmail ?? null,
         smtpFromName: settings.smtpFromName ?? null,
+        skipEmailVerification: settings.skipEmailVerification ?? false,
+        // Антибот-защита регистраций
+        signupProtectionEnabled: settings.signupProtectionEnabled !== false,
+        emailDomainBlocklist: settings.emailDomainBlocklist ?? "",
+        emailPatternBlocklist: settings.emailPatternBlocklist ?? "",
+        signupMaxPerIpPerHour: settings.signupMaxPerIpPerHour ?? 3,
+        // Happ Crypto Link (шифрование подписочных URL в happ://crypt4/...)
+        happCryptEnabled: settings.happCryptEnabled === true,
+        defaultAutoRenewEnabled: settings.defaultAutoRenewEnabled ?? false,
+        autoRenewDaysBeforeExpiry: settings.autoRenewDaysBeforeExpiry ?? 1,
+        autoRenewNotifyDaysBefore: settings.autoRenewNotifyDaysBefore ?? 3,
+        autoRenewGracePeriodDays: settings.autoRenewGracePeriodDays ?? 2,
+        autoRenewMaxRetries: settings.autoRenewMaxRetries ?? 3,
+        yookassaRecurringEnabled: settings.yookassaRecurringEnabled ?? false,
+        useRemnaSubscriptionPage: settings.useRemnaSubscriptionPage ?? false,
         publicAppUrl: settings.publicAppUrl ?? null,
         telegramBotToken: settings.telegramBotToken ?? null,
         telegramBotUsername: settings.telegramBotUsername ?? null,
         botAdminTelegramIds: settings.botAdminTelegramIds ?? null,
         notificationTelegramGroupId: settings.notificationTelegramGroupId ?? null,
+        notificationManagersGroupId: settings.notificationManagersGroupId ?? null,
+        notificationManagersTopicTickets: settings.notificationManagersTopicTickets ?? null,
+        notificationTopicNewClients: settings.notificationTopicNewClients ?? null,
+        notificationTopicPayments: settings.notificationTopicPayments ?? null,
+        notificationTopicTickets: settings.notificationTopicTickets ?? null,
+        notificationTopicBackups: settings.notificationTopicBackups ?? null,
         plategaMerchantId: settings.plategaMerchantId ?? null,
         plategaSecret: settings.plategaSecret && settings.plategaSecret !== "********" ? settings.plategaSecret : undefined,
         plategaMethods: settings.plategaMethods != null ? JSON.stringify(settings.plategaMethods) : undefined,
+        plategaWebhookSecret: (settings as { plategaWebhookSecret?: string | null }).plategaWebhookSecret && (settings as { plategaWebhookSecret?: string | null }).plategaWebhookSecret !== "********" ? (settings as { plategaWebhookSecret?: string | null }).plategaWebhookSecret : undefined,
+        paymentProvidersConfig: settings.paymentProviders != null ? JSON.stringify(settings.paymentProviders) : undefined,
         yoomoneyClientId: settings.yoomoneyClientId ?? null,
         yoomoneyClientSecret: settings.yoomoneyClientSecret && settings.yoomoneyClientSecret !== "********" ? settings.yoomoneyClientSecret : undefined,
         yoomoneyReceiverWallet: settings.yoomoneyReceiverWallet ?? null,
         yoomoneyNotificationSecret: settings.yoomoneyNotificationSecret && settings.yoomoneyNotificationSecret !== "********" ? settings.yoomoneyNotificationSecret : undefined,
         yookassaShopId: settings.yookassaShopId ?? null,
         yookassaSecretKey: settings.yookassaSecretKey && settings.yookassaSecretKey !== "********" ? settings.yookassaSecretKey : undefined,
+        yookassaWebhookBasicUser: (settings as { yookassaWebhookBasicUser?: string | null }).yookassaWebhookBasicUser ?? null,
+        yookassaWebhookBasicPassword: (settings as { yookassaWebhookBasicPassword?: string | null }).yookassaWebhookBasicPassword && (settings as { yookassaWebhookBasicPassword?: string | null }).yookassaWebhookBasicPassword !== "********" ? (settings as { yookassaWebhookBasicPassword?: string | null }).yookassaWebhookBasicPassword : undefined,
+        cryptopayApiToken: settings.cryptopayApiToken ?? null,
+        cryptopayTestnet: settings.cryptopayTestnet ?? false,
+        heleketMerchantId: settings.heleketMerchantId ?? null,
+        heleketApiKey: settings.heleketApiKey && settings.heleketApiKey !== "********" ? settings.heleketApiKey : undefined,
+        lavaShopId: settings.lavaShopId ?? null,
+        lavaSecretKey: settings.lavaSecretKey && settings.lavaSecretKey !== "********" ? settings.lavaSecretKey : undefined,
+        lavaAdditionalKey: settings.lavaAdditionalKey && settings.lavaAdditionalKey !== "********" ? settings.lavaAdditionalKey : undefined,
+        lavatopApiKey: settings.lavatopApiKey && settings.lavatopApiKey !== "********" ? settings.lavatopApiKey : undefined,
+        lavatopDefaultOfferId: settings.lavatopDefaultOfferId ?? null,
+        botWelcomeEnabled: settings.botWelcomeEnabled ?? false,
+        botWelcomeText: settings.botWelcomeText ?? null,
+        botWelcomeImage: settings.botWelcomeImage ?? null,
+        botWelcomeShowOnce: settings.botWelcomeShowOnce ?? true,
+        cabinetDesignApplyInBrowser: settings.cabinetDesignApplyInBrowser ?? false,
+        overpayApiUrl: settings.overpayApiUrl ?? null,
+        overpayProjectId: settings.overpayProjectId ?? null,
+        overpayLogin: settings.overpayLogin ?? null,
+        overpayPassword: settings.overpayPassword && settings.overpayPassword !== "********" ? settings.overpayPassword : undefined,
+        groqApiKey: settings.groqApiKey && settings.groqApiKey !== "********" ? settings.groqApiKey : undefined,
+        groqModel: settings.groqModel ?? undefined,
+        groqFallback1: settings.groqFallback1 ?? undefined,
+        groqFallback2: settings.groqFallback2 ?? undefined,
+        groqFallback3: settings.groqFallback3 ?? undefined,
+        aiSystemPrompt: settings.aiSystemPrompt ?? undefined,
         botButtons: settings.botButtons != null ? JSON.stringify(settings.botButtons) : undefined,
         botButtonsPerRow: settings.botButtonsPerRow ?? 1,
         botEmojis: settings.botEmojis != null ? settings.botEmojis : undefined,
         botBackLabel: settings.botBackLabel ?? null,
+        botDevicesText: settings.botDevicesText ?? null,
         botMenuTexts: settings.botMenuTexts != null ? JSON.stringify(settings.botMenuTexts) : undefined,
         botMenuLineVisibility: settings.botMenuLineVisibility != null ? JSON.stringify(settings.botMenuLineVisibility) : undefined,
         botTariffsText: settings.botTariffsText ?? undefined,
@@ -366,14 +850,30 @@ export function SettingsPage() {
         subscriptionPageConfig: settings.subscriptionPageConfig ?? undefined,
         supportLink: settings.supportLink ?? undefined,
         agreementLink: settings.agreementLink ?? undefined,
+        referralInstructionsUrl: settings.referralInstructionsUrl ?? undefined,
         offerLink: settings.offerLink ?? undefined,
         instructionsLink: settings.instructionsLink ?? undefined,
+        // T11 (11.05.2026): — Политика возврата.
+        refundLink: (settings as { refundLink?: string | null }).refundLink ?? undefined,
+        // Текст экрана «⭕ Помощь».
+        helpIntroText: (settings as { helpIntroText?: string | null }).helpIntroText ?? undefined,
+        // экран бесплатного TG-прокси.
+        tgProxyText: settings.tgProxyText ?? undefined,
+        tgProxyUrlPrimary: settings.tgProxyUrlPrimary ?? undefined,
+        tgProxyUrlBackup: settings.tgProxyUrlBackup ?? undefined,
+        // сериализуем массив прокси в JSON для PATCH.
+        // Бэкенд ожидает string в zod-схеме (см. tgProxyServers в admin.routes.ts).
+        tgProxyServers: settings.tgProxyServers != null ? JSON.stringify(settings.tgProxyServers) : undefined,
         ticketsEnabled: settings.ticketsEnabled ?? false,
         adminFrontNotificationsEnabled: settings.adminFrontNotificationsEnabled ?? true,
+        aiChatEnabled: settings.aiChatEnabled !== false,
         themeAccent: settings.themeAccent ?? "default",
         forceSubscribeEnabled: settings.forceSubscribeEnabled ?? false,
         forceSubscribeChannelId: settings.forceSubscribeChannelId ?? null,
         forceSubscribeMessage: settings.forceSubscribeMessage ?? null,
+        blacklistEnabled: settings.blacklistEnabled ?? false,
+        botAutoDeleteUnknownMessages: settings.botAutoDeleteUnknownMessages ?? false,
+        botInfoBlock: settings.botInfoBlock ?? null,
         allowUserThemeChange: (settings as any).allowUserThemeChange ?? true,
         sellOptionsEnabled: settings.sellOptionsEnabled ?? false,
         sellOptionsTrafficEnabled: settings.sellOptionsTrafficEnabled ?? false,
@@ -382,6 +882,144 @@ export function SettingsPage() {
         sellOptionsDevicesProducts: settings.sellOptionsDevicesProducts?.length ? JSON.stringify(settings.sellOptionsDevicesProducts) : null,
         sellOptionsServersEnabled: settings.sellOptionsServersEnabled ?? false,
         sellOptionsServersProducts: settings.sellOptionsServersProducts?.length ? JSON.stringify(settings.sellOptionsServersProducts) : null,
+        giftSubscriptionsEnabled: settings.giftSubscriptionsEnabled ?? false,
+        giftCodeExpiryHours: settings.giftCodeExpiryHours ?? 72,
+        maxAdditionalSubscriptions: settings.maxAdditionalSubscriptions ?? 5,
+        giftCodeFormatLength: settings.giftCodeFormatLength ?? 12,
+        giftRateLimitPerMinute: settings.giftRateLimitPerMinute ?? 5,
+        giftExpiryNotificationDays: settings.giftExpiryNotificationDays ?? 3,
+        giftReferralEnabled: settings.giftReferralEnabled ?? true,
+        giftMessageMaxLength: settings.giftMessageMaxLength ?? 200,
+        customBuildEnabled: settings.customBuildEnabled ?? false,
+        customBuildPricePerDay: settings.customBuildPricePerDay ?? 0,
+        customBuildPricePerDevice: settings.customBuildPricePerDevice ?? 0,
+        customBuildTrafficMode: settings.customBuildTrafficMode ?? "unlimited",
+        customBuildPricePerGb: settings.customBuildPricePerGb ?? 0,
+        customBuildSquadUuid: settings.customBuildSquadUuid ?? null,
+        customBuildCurrency: settings.customBuildCurrency ?? "rub",
+        customBuildMaxDays: settings.customBuildMaxDays ?? 360,
+        customBuildMaxDevices: settings.customBuildMaxDevices ?? 10,
+        googleLoginEnabled: settings.googleLoginEnabled ?? false,
+        googleClientId: settings.googleClientId ?? null,
+        googleClientSecret: settings.googleClientSecret && settings.googleClientSecret !== "********" ? settings.googleClientSecret : undefined,
+        appleLoginEnabled: settings.appleLoginEnabled ?? false,
+        appleClientId: settings.appleClientId ?? null,
+        appleTeamId: settings.appleTeamId ?? null,
+        appleKeyId: settings.appleKeyId ?? null,
+        applePrivateKey: settings.applePrivateKey && settings.applePrivateKey !== "********" ? settings.applePrivateKey : undefined,
+        landingEnabled: settings.landingEnabled ?? false,
+        landingHeroTitle: settings.landingHeroTitle ?? null,
+        landingHeroSubtitle: settings.landingHeroSubtitle ?? null,
+        landingHeroCtaText: settings.landingHeroCtaText ?? null,
+        landingShowTariffs: settings.landingShowTariffs !== false,
+        landingContacts: settings.landingContacts ?? null,
+        landingOfferLink: settings.landingOfferLink ?? null,
+        landingPrivacyLink: settings.landingPrivacyLink ?? null,
+        landingFooterText: settings.landingFooterText ?? null,
+        landingHeroBadge: settings.landingHeroBadge ?? null,
+        landingHeroHint: settings.landingHeroHint ?? null,
+        landingFeature1Label: settings.landingFeature1Label ?? null,
+        landingFeature1Sub: settings.landingFeature1Sub ?? null,
+        landingFeature2Label: settings.landingFeature2Label ?? null,
+        landingFeature2Sub: settings.landingFeature2Sub ?? null,
+        landingFeature3Label: settings.landingFeature3Label ?? null,
+        landingFeature3Sub: settings.landingFeature3Sub ?? null,
+        landingFeature4Label: settings.landingFeature4Label ?? null,
+        landingFeature4Sub: settings.landingFeature4Sub ?? null,
+        landingFeature5Label: settings.landingFeature5Label ?? null,
+        landingFeature5Sub: settings.landingFeature5Sub ?? null,
+        landingBenefitsTitle: settings.landingBenefitsTitle ?? null,
+        landingBenefitsSubtitle: settings.landingBenefitsSubtitle ?? null,
+        landingBenefit1Title: settings.landingBenefit1Title ?? null,
+        landingBenefit1Desc: settings.landingBenefit1Desc ?? null,
+        landingBenefit2Title: settings.landingBenefit2Title ?? null,
+        landingBenefit2Desc: settings.landingBenefit2Desc ?? null,
+        landingBenefit3Title: settings.landingBenefit3Title ?? null,
+        landingBenefit3Desc: settings.landingBenefit3Desc ?? null,
+        landingBenefit4Title: settings.landingBenefit4Title ?? null,
+        landingBenefit4Desc: settings.landingBenefit4Desc ?? null,
+        landingBenefit5Title: settings.landingBenefit5Title ?? null,
+        landingBenefit5Desc: settings.landingBenefit5Desc ?? null,
+        landingBenefit6Title: settings.landingBenefit6Title ?? null,
+        landingBenefit6Desc: settings.landingBenefit6Desc ?? null,
+        landingTariffsTitle: settings.landingTariffsTitle ?? null,
+        landingTariffsSubtitle: settings.landingTariffsSubtitle ?? null,
+        landingDevicesTitle: settings.landingDevicesTitle ?? null,
+        landingDevicesSubtitle: settings.landingDevicesSubtitle ?? null,
+        landingFaqTitle: settings.landingFaqTitle ?? null,
+        landingFaqJson: settings.landingFaqJson ?? null,
+        landingHeroHeadline1: settings.landingHeroHeadline1 ?? null,
+        landingHeroHeadline2: settings.landingHeroHeadline2 ?? null,
+        landingHeaderBadge: settings.landingHeaderBadge ?? null,
+        landingButtonLogin: settings.landingButtonLogin ?? null,
+        landingButtonLoginCabinet: settings.landingButtonLoginCabinet ?? null,
+        landingNavBenefits: settings.landingNavBenefits ?? null,
+        landingNavTariffs: settings.landingNavTariffs ?? null,
+        landingNavDevices: settings.landingNavDevices ?? null,
+        landingNavFaq: settings.landingNavFaq ?? null,
+        landingBenefitsBadge: settings.landingBenefitsBadge ?? null,
+        landingDefaultPaymentText: settings.landingDefaultPaymentText ?? null,
+        landingButtonChooseTariff: settings.landingButtonChooseTariff ?? null,
+        landingNoTariffsMessage: settings.landingNoTariffsMessage ?? null,
+        landingButtonWatchTariffs: settings.landingButtonWatchTariffs ?? null,
+        landingButtonStart: settings.landingButtonStart ?? null,
+        landingButtonOpenCabinet: settings.landingButtonOpenCabinet ?? null,
+        landingJourneyStepsJson: landingJourneySteps.length ? JSON.stringify(landingJourneySteps) : null,
+        landingSignalCardsJson: landingSignalCards.length ? JSON.stringify(landingSignalCards) : null,
+        landingTrustPointsJson: landingTrustPoints.some(Boolean) ? JSON.stringify(landingTrustPoints) : null,
+        landingExperiencePanelsJson: landingExperiencePanels.length ? JSON.stringify(landingExperiencePanels) : null,
+        landingDevicesListJson: landingDevicesList.filter(Boolean).length ? JSON.stringify(landingDevicesList.filter(Boolean).map((name) => ({ name }))) : null,
+        landingQuickStartJson: landingQuickStartList.some(Boolean) ? JSON.stringify(landingQuickStartList) : null,
+        landingInfraTitle: settings.landingInfraTitle ?? null,
+        landingNetworkCockpitText: settings.landingNetworkCockpitText ?? null,
+        landingPulseTitle: settings.landingPulseTitle ?? null,
+        landingComfortTitle: settings.landingComfortTitle ?? null,
+        landingComfortBadge: settings.landingComfortBadge ?? null,
+        landingPrinciplesTitle: settings.landingPrinciplesTitle ?? null,
+        landingTechTitle: settings.landingTechTitle ?? null,
+        landingTechDesc: settings.landingTechDesc ?? null,
+        landingCategorySubtitle: settings.landingCategorySubtitle ?? null,
+        landingTariffDefaultDesc: settings.landingTariffDefaultDesc ?? null,
+        landingTariffBullet1: settings.landingTariffBullet1 ?? null,
+        landingTariffBullet2: settings.landingTariffBullet2 ?? null,
+        landingTariffBullet3: settings.landingTariffBullet3 ?? null,
+        landingLowestTariffDesc: settings.landingLowestTariffDesc ?? null,
+        landingDevicesCockpitText: settings.landingDevicesCockpitText ?? null,
+        landingUniversalityTitle: settings.landingUniversalityTitle ?? null,
+        landingUniversalityDesc: settings.landingUniversalityDesc ?? null,
+        landingQuickSetupTitle: settings.landingQuickSetupTitle ?? null,
+        landingQuickSetupDesc: settings.landingQuickSetupDesc ?? null,
+        landingPremiumServiceTitle: settings.landingPremiumServiceTitle ?? null,
+        landingPremiumServicePara1: settings.landingPremiumServicePara1 ?? null,
+        landingPremiumServicePara2: settings.landingPremiumServicePara2 ?? null,
+        landingHowItWorksTitle: settings.landingHowItWorksTitle ?? null,
+        landingHowItWorksDesc: settings.landingHowItWorksDesc ?? null,
+        landingStatsPlatforms: settings.landingStatsPlatforms ?? null,
+        landingStatsTariffsLabel: settings.landingStatsTariffsLabel ?? null,
+        landingStatsAccessLabel: settings.landingStatsAccessLabel ?? null,
+        landingStatsPaymentMethods: settings.landingStatsPaymentMethods ?? null,
+        landingReadyToConnectEyebrow: settings.landingReadyToConnectEyebrow ?? null,
+        landingReadyToConnectTitle: settings.landingReadyToConnectTitle ?? null,
+        landingReadyToConnectDesc: settings.landingReadyToConnectDesc ?? null,
+        landingShowFeatures: settings.landingShowFeatures !== false,
+        landingShowBenefits: settings.landingShowBenefits !== false,
+        landingShowDevices: settings.landingShowDevices !== false,
+        landingShowFaq: settings.landingShowFaq !== false,
+        landingShowHowItWorks: settings.landingShowHowItWorks !== false,
+        landingShowCta: settings.landingShowCta !== false,
+        proxyEnabled: settings.proxyEnabled ?? false,
+        proxyUrl: settings.proxyUrl ?? null,
+        proxyTelegram: settings.proxyTelegram ?? false,
+        proxyPayments: settings.proxyPayments ?? false,
+        proxyAi: settings.proxyAi ?? false,
+        nalogEnabled: settings.nalogEnabled ?? false,
+        nalogInn: settings.nalogInn ?? null,
+        nalogPassword: settings.nalogPassword ?? null,
+        nalogDeviceId: settings.nalogDeviceId ?? null,
+        nalogServiceName: settings.nalogServiceName ?? null,
+        geoMapEnabled: settings.geoMapEnabled ?? false,
+        geoCacheTtl: settings.geoCacheTtl ?? 60,
+        maxmindDbPath: settings.maxmindDbPath ?? null,
       })
       .then((updated) => {
         const u = updated as AdminSettings;
@@ -392,139 +1030,269 @@ export function SettingsPage() {
             ...(settings.botInnerButtonStyles ?? {}),
           },
         });
-        setMessage("Сохранено");
+        setMessage(t("admin.settings.saved"));
       })
-      .catch(() => setMessage("Ошибка"))
+      .catch(() => setMessage(t("admin.settings.error")))
       .finally(() => setSaving(false));
   }
 
-  if (loading) return <div className="text-muted-foreground">Загрузка…</div>;
-  if (!settings) return <div className="text-destructive">Ошибка загрузки</div>;
+  if (loading) return <div className="text-muted-foreground">{t("admin.common.loading")}</div>;
+  if (!settings) return <div className="text-destructive">{t("admin.common.loading_error")}</div>;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Настройки</h1>
-        <p className="text-muted-foreground">Языки, валюты, триал и параметры для бота, Mini App и сайта</p>
+      {/* ═══ HERO ═══ */}
+      <div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-gradient-to-br from-sky-500/10 via-indigo-500/10 to-fuchsia-500/10 backdrop-blur-3xl shadow-2xl">
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-fuchsia-500/10 pointer-events-none" />
+        <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-gradient-to-br from-sky-500/20 to-fuchsia-500/20 blur-3xl pointer-events-none" />
+        <div className="relative px-6 py-7 sm:px-8 sm:py-8 flex items-start gap-5">
+          <div className="h-16 w-16 rounded-3xl bg-gradient-to-br from-sky-500/30 via-indigo-500/20 to-fuchsia-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+            <Settings2 className="h-8 w-8 text-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-3xl sm:text-4xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-sky-500 via-indigo-500 to-fuchsia-500">
+              {t("admin.settings.title")}
+            </h1>
+            <p className="text-sm sm:text-base text-muted-foreground mt-2 leading-relaxed max-w-2xl">
+              {t("admin.settings.subtitle")}
+            </p>
+          </div>
+        </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="w-full grid grid-cols-2 sm:grid-cols-10 gap-2 p-2 h-auto bg-muted/50 rounded-2xl border shadow-sm">
-          <TabsTrigger value="general" className="gap-2 py-3 px-4 rounded-xl">
-            <Settings2 className="h-4 w-4 shrink-0" />
-            Общие
+        {/* grid-cols-9 (было 10) — старая вкладка «🎁 Триал» убрана.
+            Все настройки триала теперь живут в отдельном разделе /admin/trials (T15 multi-trials),
+            где можно создавать несколько пробных пресетов с разными тарифами. */}
+        <TabsList className="w-full grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-9 gap-1.5 p-1.5 h-auto bg-muted/40 rounded-2xl border border-white/10 shadow-sm backdrop-blur-md">
+          <TabsTrigger value="general" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-slate-500 data-[state=active]:to-zinc-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Settings2 className="h-4 w-4 shrink-0" />{t("admin.settings.tab_general")}
           </TabsTrigger>
-          <TabsTrigger value="trial" className="gap-2 py-3 px-4 rounded-xl">
-            <Gift className="h-4 w-4 shrink-0" />
-            Триал
+          <TabsTrigger value="referral" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-violet-500 data-[state=active]:to-purple-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Users className="h-4 w-4 shrink-0" />{t("admin.settings.tab_referral")}
           </TabsTrigger>
-          <TabsTrigger value="referral" className="gap-2 py-3 px-4 rounded-xl">
-            <Users className="h-4 w-4 shrink-0" />
-            Рефералы
+          <TabsTrigger value="payments" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-amber-500 data-[state=active]:to-orange-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <CreditCard className="h-4 w-4 shrink-0" />{t("admin.settings.tab_payments")}
           </TabsTrigger>
-          <TabsTrigger value="payments" className="gap-2 py-3 px-4 rounded-xl">
-            <CreditCard className="h-4 w-4 shrink-0" />
-            Платежи
+          <TabsTrigger value="bot" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-sky-500 data-[state=active]:to-blue-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Bot className="h-4 w-4 shrink-0" />{t("admin.settings.tab_bot")}
           </TabsTrigger>
-          <TabsTrigger value="bot" className="gap-2 py-3 px-4 rounded-xl">
-            <Bot className="h-4 w-4 shrink-0" />
-            Бот
+          <TabsTrigger value="ai" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-fuchsia-500 data-[state=active]:to-pink-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Sparkles className="h-4 w-4 shrink-0" />{t("admin.settings.tab_ai")}
           </TabsTrigger>
-          <TabsTrigger value="mail-telegram" className="gap-2 py-3 px-4 rounded-xl">
-            <Mail className="h-4 w-4 shrink-0" />
-            Почта и Telegram
+          <TabsTrigger value="mail-telegram" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500 data-[state=active]:to-teal-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Mail className="h-4 w-4 shrink-0" />{t("admin.settings.tab_mail_telegram")}
           </TabsTrigger>
-          <TabsTrigger value="subpage" className="gap-2 py-3 px-4 rounded-xl">
-            <FileJson className="h-4 w-4 shrink-0" />
-            Страница подписки
+          <TabsTrigger value="subpage" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-rose-500 data-[state=active]:to-pink-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <FileJson className="h-4 w-4 shrink-0" />{t("admin.settings.tab_subpage")}
           </TabsTrigger>
-          <TabsTrigger value="theme" className="gap-2 py-3 px-4 rounded-xl">
-            <Palette className="h-4 w-4 shrink-0" />
-            Тема
+          <TabsTrigger value="theme" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-pink-500 data-[state=active]:to-rose-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Palette className="h-4 w-4 shrink-0" />{t("admin.settings.tab_theme")}
           </TabsTrigger>
-          <TabsTrigger value="options" className="gap-2 py-3 px-4 rounded-xl">
-            <Package className="h-4 w-4 shrink-0" />
-            Опции
+          <TabsTrigger value="options" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-yellow-500 data-[state=active]:to-amber-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Package className="h-4 w-4 shrink-0" />{t("admin.settings.tab_options")}
           </TabsTrigger>
-          <TabsTrigger value="sync" className="gap-2 py-3 px-4 rounded-xl">
-            <ArrowLeftRight className="h-4 w-4 shrink-0" />
-            Синхронизация
+          <TabsTrigger value="custom-build" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-purple-500 data-[state=active]:to-violet-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Layers className="h-4 w-4 shrink-0" />{t("admin.settings.tab_custom_build")}
+          </TabsTrigger>
+          <TabsTrigger value="oauth" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-zinc-500 data-[state=active]:to-slate-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <KeyRound className="h-4 w-4 shrink-0" />{t("admin.settings.tab_oauth")}
+          </TabsTrigger>
+          <TabsTrigger value="landing" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-green-500 data-[state=active]:to-emerald-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Globe className="h-4 w-4 shrink-0" />{t("admin.settings.tab_landing")}
+          </TabsTrigger>
+          <TabsTrigger value="server-ssh" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-stone-500 data-[state=active]:to-zinc-600 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Terminal className="h-4 w-4 shrink-0" />{t("admin.settings.tab_ssh")}
+          </TabsTrigger>
+          <TabsTrigger value="proxy-settings" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-orange-500 data-[state=active]:to-red-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Shield className="h-4 w-4 shrink-0" />{t("admin.settings.tab_proxy")}
+          </TabsTrigger>
+          <TabsTrigger value="nalog-settings" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-yellow-600 data-[state=active]:to-amber-600 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <FileText className="h-4 w-4 shrink-0" />{t("admin.settings.tab_nalog")}
+          </TabsTrigger>
+          <TabsTrigger value="geo-map" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-teal-500 data-[state=active]:to-cyan-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <MapPin className="h-4 w-4 shrink-0" />{t("admin.settings.tab_map")}
+          </TabsTrigger>
+          <TabsTrigger value="gifts" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-pink-500 data-[state=active]:to-fuchsia-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <Gift className="h-4 w-4 shrink-0" />Подарки
+          </TabsTrigger>
+          <TabsTrigger value="sync" className="gap-1.5 py-2.5 px-3 rounded-xl text-xs sm:text-sm data-[state=active]:bg-gradient-to-r data-[state=active]:from-violet-500 data-[state=active]:to-indigo-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+            <ArrowLeftRight className="h-4 w-4 shrink-0" />{t("admin.settings.tab_sync")}
           </TabsTrigger>
         </TabsList>
 
         <form onSubmit={handleSubmit}>
           <TabsContent value="general">
-            <Card>
-              <CardHeader>
-                <CardTitle>Общие</CardTitle>
-                <p className="text-sm text-muted-foreground">Название, логотип, тикет-система, языки и валюты</p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      id="tickets-enabled-general"
-                      checked={!!settings.ticketsEnabled}
-                      onCheckedChange={(checked: boolean) =>
-                        setSettings((s) => (s ? { ...s, ticketsEnabled: checked === true } : s))
-                      }
-                    />
-                    <div>
-                      <Label htmlFor="tickets-enabled-general" className="text-base font-medium cursor-pointer">Тикет-система</Label>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Раздел «Тикеты» в кабинете (сайт и мини-апп) и кнопка «🎫 Тикеты» в боте — обращения в поддержку и переписка.
-                      </p>
-                    </div>
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-slate-500/10 via-zinc-500/10 to-stone-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-slate-500/5 via-transparent to-zinc-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-slate-500/30 via-zinc-500/20 to-stone-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <Settings2 className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-500 via-zinc-500 to-stone-500">
+                      {t("admin.settings.general_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.general_subtitle")}</p>
                   </div>
                 </div>
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      id="admin-front-notifications"
-                      checked={settings.adminFrontNotificationsEnabled ?? true}
-                      onCheckedChange={(checked: boolean) =>
-                        setSettings((s) =>
-                          s ? { ...s, adminFrontNotificationsEnabled: checked === true } : s
-                        )
-                      }
-                    />
-                    <div>
-                      <Label htmlFor="admin-front-notifications" className="text-base font-medium cursor-pointer">
-                        Всплывающие уведомления в админке
-                      </Label>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Короткие уведомления о новых регистрациях, пополнениях, оплатах и тикетах в панели администратора.
-                      </p>
-                    </div>
+              </div>
+              <CardContent className="space-y-5 p-4 sm:p-6">
+                {/* === Функции сервиса === */}
+                <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-500/5 via-blue-500/5 to-indigo-500/5 p-5 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-sky-500/20 flex items-center justify-center"><Sparkles className="h-4 w-4 text-sky-500" /></div>
+                    <h3 className="text-base font-semibold">Функции сервиса</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Включай/выключай ключевые модули клиентского кабинета и админки.</p>
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 hover:border-white/10 transition-colors cursor-pointer">
+                      <div className="h-9 w-9 rounded-xl bg-sky-500/10 flex items-center justify-center shrink-0"><MessageSquare className="h-4 w-4 text-sky-500" /></div>
+                      <div className="flex-1 min-w-0">
+                        <Label htmlFor="tickets-enabled-general" className="text-sm font-medium cursor-pointer">{t("admin.settings.ticket_system")}</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t("admin.settings.ticket_hint")}</p>
+                      </div>
+                      <Switch
+                        id="tickets-enabled-general"
+                        checked={!!settings.ticketsEnabled}
+                        onCheckedChange={(checked: boolean) => setSettings((s) => (s ? { ...s, ticketsEnabled: checked === true } : s))}
+                      />
+                    </label>
+                    <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 hover:border-white/10 transition-colors cursor-pointer">
+                      <div className="h-9 w-9 rounded-xl bg-blue-500/10 flex items-center justify-center shrink-0"><Bell className="h-4 w-4 text-blue-500" /></div>
+                      <div className="flex-1 min-w-0">
+                        <Label htmlFor="admin-front-notifications" className="text-sm font-medium cursor-pointer">{t("admin.settings.popup_notifications")}</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t("admin.settings.popup_hint")}</p>
+                      </div>
+                      <Switch
+                        id="admin-front-notifications"
+                        checked={settings.adminFrontNotificationsEnabled ?? true}
+                        onCheckedChange={(checked: boolean) => setSettings((s) => s ? { ...s, adminFrontNotificationsEnabled: checked === true } : s)}
+                      />
+                    </label>
+                    <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 hover:border-white/10 transition-colors cursor-pointer">
+                      <div className="h-9 w-9 rounded-xl bg-indigo-500/10 flex items-center justify-center shrink-0"><Sparkles className="h-4 w-4 text-indigo-500" /></div>
+                      <div className="flex-1 min-w-0">
+                        <Label htmlFor="ai-chat-enabled" className="text-sm font-medium cursor-pointer">{t("admin.settings.ai_chat_label")}</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">{t("admin.settings.ai_chat_hint")}</p>
+                      </div>
+                      <Switch
+                        id="ai-chat-enabled"
+                        checked={settings.aiChatEnabled !== false}
+                        onCheckedChange={(checked: boolean) => setSettings((s) => (s ? { ...s, aiChatEnabled: checked === true } : s))}
+                      />
+                    </label>
                   </div>
                 </div>
-                <div className="space-y-2 rounded-lg border p-4 bg-muted/20">
-                  <Label>Группа для уведомлений (Telegram Chat ID)</Label>
-                  <Input
-                    value={settings.notificationTelegramGroupId ?? ""}
-                    onChange={(e) => setSettings((s) => (s ? { ...s, notificationTelegramGroupId: e.target.value.trim() || null } : s))}
-                    placeholder="-1001234567890"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Если указать Chat ID группы или канала, туда будут дублироваться все админские уведомления (новые клиенты, оплаты, тикеты). Добавьте бота в группу. У супергрупп ID обычно начинается с -100.
-                  </p>
+
+                {/* === Уведомления в Telegram === */}
+                <div className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 via-teal-500/5 to-sky-500/5 p-5 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-cyan-500/20 flex items-center justify-center"><Send className="h-4 w-4 text-cyan-500" /></div>
+                    <h3 className="text-base font-semibold">Уведомления в Telegram-группу</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Бот шлёт системные уведомления (новые клиенты, оплаты, тикеты, бэкапы) в указанную группу. Если группа без тем — всё в общий чат, иначе можно разрулить по топикам ниже.</p>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">ID группы</Label>
+                    <Input
+                      value={settings.notificationTelegramGroupId ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, notificationTelegramGroupId: e.target.value.trim() || null } : s))}
+                      placeholder="-1001234567890"
+                    />
+                    <p className="text-[11px] text-muted-foreground">{t("admin.settings.notification_group_hint")}</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">Группа менеджеров (тикеты)</Label>
+                    <Input
+                      value={settings.notificationManagersGroupId ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, notificationManagersGroupId: e.target.value.trim() || null } : s))}
+                      placeholder="-1001234567890"
+                    />
+                    <p className="text-[11px] text-muted-foreground">Отдельная группа: сюда дублируются ТОЛЬКО уведомления о новых тикетах (для менеджеров).</p>
+                    {settings.notificationManagersGroupId?.trim() && (
+                      <div className="pt-1 space-y-1">
+                        <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Топик тикетов (message_thread_id, необязательно)</Label>
+                        <Input
+                          value={settings.notificationManagersTopicTickets ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, notificationManagersTopicTickets: e.target.value.trim() || null } : s))}
+                          placeholder="ID топика"
+                          className="h-9 text-sm"
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {settings.notificationTelegramGroupId?.trim() && (
+                    <div className="rounded-xl border border-white/10 bg-card/40 p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="h-1 w-6 rounded-full bg-gradient-to-r from-cyan-500 to-teal-500" />
+                        <p className="text-sm font-medium">{t("admin.settings.topics")}</p>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">{t("admin.settings.topics_hint")}</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t("admin.settings.topic_new_clients")}</Label>
+                          <Input
+                            value={settings.notificationTopicNewClients ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, notificationTopicNewClients: e.target.value.trim() || null } : s))}
+                            placeholder={t("admin.settings.topic_id_placeholder")}
+                            className="h-9 text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t("admin.settings.topic_payments")}</Label>
+                          <Input
+                            value={settings.notificationTopicPayments ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, notificationTopicPayments: e.target.value.trim() || null } : s))}
+                            placeholder={t("admin.settings.topic_id_placeholder")}
+                            className="h-9 text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t("admin.settings.topic_tickets")}</Label>
+                          <Input
+                            value={settings.notificationTopicTickets ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, notificationTopicTickets: e.target.value.trim() || null } : s))}
+                            placeholder={t("admin.settings.topic_id_placeholder")}
+                            className="h-9 text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t("admin.settings.topic_backups")}</Label>
+                          <Input
+                            value={settings.notificationTopicBackups ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, notificationTopicBackups: e.target.value.trim() || null } : s))}
+                            placeholder={t("admin.settings.topic_id_placeholder")}
+                            className="h-9 text-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
+                {/* === Брендинг === */}
+                <div className="rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/5 via-violet-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-purple-500/20 flex items-center justify-center"><Building className="h-4 w-4 text-purple-500" /></div>
+                    <h3 className="text-base font-semibold">Брендинг</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Имя сервиса, логотипы, фавикон, публичный URL — всё что видит клиент в кабинете и боте.</p>
+                  <div className="space-y-2">
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t("admin.settings.service_name")}</Label>
+                    <Input
+                      value={settings.serviceName}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, serviceName: e.target.value } : s))}
+                    />
+                    <p className="text-[11px] text-muted-foreground">{t("admin.settings.service_name_hint")}</p>
+                  </div>
                 <div className="space-y-2">
-                  <Label>Название сервиса</Label>
-                  <Input
-                    value={settings.serviceName}
-                    onChange={(e) => setSettings((s) => (s ? { ...s, serviceName: e.target.value } : s))}
-                  />
-                  <p className="text-xs text-muted-foreground">Отображается в шапке админки и в кабинете клиента</p>
-                </div>
-                <div className="space-y-2">
-                  <Label>Логотип</Label>
+                  <Label>{t("admin.settings.logo")}</Label>
                   {settings.logo ? (
                     <div className="flex items-center gap-3">
-                      <img src={settings.logo} alt="Логотип" className="h-12 object-contain rounded border" />
+                      <img src={settings.logo} alt={t("admin.settings.logo_alt")} className="h-12 object-contain rounded border" />
                       <div className="flex gap-2">
                         <Label className="cursor-pointer">
-                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">Загрузить другой</span>
+                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">{t("admin.settings.upload_another")}</span>
                           <input
                             type="file"
                             accept="image/*"
@@ -539,14 +1307,14 @@ export function SettingsPage() {
                           />
                         </Label>
                         <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, logo: null } : s))}>
-                          Удалить
+                          {t("admin.settings.delete")}
                         </Button>
                       </div>
                     </div>
                   ) : (
                     <div>
                       <Label className="cursor-pointer">
-                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">Загрузить логотип</span>
+                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">{t("admin.settings.upload_logo")}</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -562,16 +1330,16 @@ export function SettingsPage() {
                       </Label>
                     </div>
                   )}
-                  <p className="text-xs text-muted-foreground">Для сайта и кабинета (шапка, логин)</p>
+                  <p className="text-xs text-muted-foreground">{t("admin.settings.logo_hint")}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label>Логотип для бота</Label>
+                  <Label>{t("admin.settings.bot_logo")}</Label>
                   {settings.logoBot ? (
                     <div className="flex items-center gap-3">
-                      <img src={settings.logoBot} alt="Логотип бота" className="h-12 object-contain rounded border" />
+                      <img src={settings.logoBot} alt={t("admin.settings.bot_logo_alt")} className="h-12 object-contain rounded border" />
                       <div className="flex gap-2">
                         <Label className="cursor-pointer">
-                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">Загрузить другой</span>
+                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">{t("admin.settings.upload_another")}</span>
                           <input
                             type="file"
                             accept="image/*"
@@ -586,14 +1354,14 @@ export function SettingsPage() {
                           />
                         </Label>
                         <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, logoBot: null } : s))}>
-                          Удалить
+                          {t("admin.settings.delete")}
                         </Button>
                       </div>
                     </div>
                   ) : (
                     <div>
                       <Label className="cursor-pointer">
-                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">Загрузить логотип для бота</span>
+                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">{t("admin.settings.upload_bot_logo")}</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -609,16 +1377,16 @@ export function SettingsPage() {
                       </Label>
                     </div>
                   )}
-                  <p className="text-xs text-muted-foreground">Фото или GIF в приветственном сообщении Telegram-бота. Если не задан — используется логотип сайта</p>
+                  <p className="text-xs text-muted-foreground">{t("admin.settings.bot_logo_hint")}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label>Favicon</Label>
+                  <Label>{t("admin.settings.favicon")}</Label>
                   {settings.favicon ? (
                     <div className="flex items-center gap-3">
                       <img src={settings.favicon} alt="Favicon" className="h-8 w-8 object-contain rounded border" />
                       <div className="flex gap-2">
                         <Label className="cursor-pointer">
-                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">Загрузить другой</span>
+                          <span className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground h-9 px-4">{t("admin.settings.upload_another")}</span>
                           <input
                             type="file"
                             accept="image/*"
@@ -633,14 +1401,14 @@ export function SettingsPage() {
                           />
                         </Label>
                         <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, favicon: null } : s))}>
-                          Удалить
+                          {t("admin.settings.delete")}
                         </Button>
                       </div>
                     </div>
                   ) : (
                     <div>
                       <Label className="cursor-pointer">
-                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">Загрузить favicon</span>
+                        <span className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-9 px-4 hover:bg-accent">{t("admin.settings.upload_favicon")}</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -654,36 +1422,90 @@ export function SettingsPage() {
                           }}
                         />
                       </Label>
-                      <p className="text-xs text-muted-foreground mt-1">Рекомендуется 32×32 или 64×64 (PNG/SVG)</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.favicon_hint")}</p>
                     </div>
                   )}
                 </div>
                 <div className="space-y-2">
-                  <Label>URL приложения (ссылка на сайт)</Label>
+                  <Label>{t("admin.settings.app_url")}</Label>
                   <Input
                     value={settings.publicAppUrl ?? ""}
                     onChange={(e) => setSettings((s) => (s ? { ...s, publicAppUrl: e.target.value || null } : s))}
                     placeholder="https://example.com"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Без слэша в конце. От него генерируются ссылка подтверждения в письме, редиректы после оплаты и callback Platega.
+                    {t("admin.settings.app_url_hint")}
                   </p>
                 </div>
+
+                {/* Cabinet design selector — переключение между Classic и Stealth UI кабинета */}
                 <div className="space-y-2">
-                  <Label>Языки</Label>
+                  <Label>Дизайн мини-аппа клиента</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {([
+                      { v: "classic", title: "Classic", desc: "Текущий glass-дизайн с настройкой темы и акцента", swatch: "from-primary/30 to-purple-500/20" },
+                      { v: "stealth", title: "Stealth", desc: "Тёмный неон с red-акцентом, network-фоном и stadium-кнопками", swatch: "from-rose-500/40 to-orange-500/30" },
+                    ] as const).map((d) => {
+                      const active = (settings.cabinetDesign ?? "classic") === d.v;
+                      return (
+                        <button
+                          key={d.v}
+                          type="button"
+                          onClick={() => setSettings((s) => (s ? { ...s, cabinetDesign: d.v } : s))}
+                          className={`relative overflow-hidden rounded-2xl border p-4 text-left transition-all ${active ? "border-primary ring-2 ring-primary/30 bg-primary/5" : "border-white/10 hover:border-white/30 bg-card/40"}`}
+                        >
+                          <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${d.swatch}`} />
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-base font-semibold tracking-tight">{d.title}</span>
+                            {active && <span className="text-[10px] font-bold uppercase tracking-widest bg-primary text-primary-foreground rounded-md px-1.5 py-0.5">Активно</span>}
+                          </div>
+                          <p className="text-xs text-muted-foreground leading-relaxed">{d.desc}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Выбранный дизайн применится ко всем клиентам при следующем открытии кабинета. Админ-панель не затрагивается.
+                  </p>
+                  <label className="flex items-start gap-3 rounded-xl border border-white/10 bg-card/30 p-3 mt-2 cursor-pointer hover:bg-card/50 transition-colors">
+                    <Switch
+                      checked={settings.cabinetDesignApplyInBrowser ?? false}
+                      onCheckedChange={(checked: boolean) => setSettings((s) => (s ? { ...s, cabinetDesignApplyInBrowser: checked === true } : s))}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">Применять также в обычном браузере</div>
+                      <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                        По умолчанию выбранный дизайн используется только в Telegram Mini App. В обычном браузере (web кабинет) клиенты видят Classic.
+                        Включи если хочешь чтобы Stealth применялся и на сайте.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+                </div>
+                {/* === Локализация === */}
+                <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/5 via-orange-500/5 to-yellow-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-amber-500/20 flex items-center justify-center"><LanguagesIcon className="h-4 w-4 text-amber-500" /></div>
+                    <h3 className="text-base font-semibold">Локализация</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Языки и валюты, доступные клиенту. Звёздочка ★ — язык/валюта по умолчанию для новых пользователей.</p>
+                <div className="space-y-2">
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t("admin.settings.languages")}</Label>
                   <div className="flex flex-wrap gap-2">
                     {(() => {
-                      const preset = ["ru", "en"];
+                      const preset = installedLangCodes.length ? installedLangCodes : FALLBACK_LANGS;
                       const defaultLang = (settings.defaultLanguage && preset.includes(settings.defaultLanguage) ? settings.defaultLanguage : preset[0]) ?? "";
                       return preset.map((lang) => {
                         const isActive = settings.activeLanguages.includes(lang);
                         const isDefault = lang === defaultLang;
+                        const displayName = LANG_NAMES[lang] ?? lang.toUpperCase();
                         return (
                           <Button
                             key={lang}
                             type="button"
                             variant={isActive ? "default" : "outline"}
                             size="sm"
+                            title={displayName}
                             onClick={() =>
                               setSettings((s) => {
                                 if (!s) return s;
@@ -702,21 +1524,27 @@ export function SettingsPage() {
                       });
                     })()}
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("admin.settings.languages_hint", "Список языков формируется из раздела «Языки». Добавьте пакет там, чтобы включить новый язык здесь.")}
+                  </p>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Label className="text-xs text-muted-foreground">Основной язык:</Label>
+                    <Label className="text-xs text-muted-foreground">{t("admin.settings.default_language")}</Label>
                     <select
                       className="rounded-md border border-input bg-background px-2 py-1 text-sm"
-                      value={(settings.defaultLanguage && ALLOWED_LANGS.includes(settings.defaultLanguage) ? settings.defaultLanguage : ALLOWED_LANGS[0]) ?? ""}
+                      value={(() => {
+                        const active = settings.activeLanguages.length ? settings.activeLanguages : installedLangCodes;
+                        return (settings.defaultLanguage && active.includes(settings.defaultLanguage) ? settings.defaultLanguage : active[0]) ?? "";
+                      })()}
                       onChange={(e) => setSettings((s) => s ? { ...s, defaultLanguage: e.target.value } : s)}
                     >
-                      {ALLOWED_LANGS.map((l) => (
-                        <option key={l} value={l}>{l.toUpperCase()}</option>
+                      {(settings.activeLanguages.length ? settings.activeLanguages : installedLangCodes).map((l) => (
+                        <option key={l} value={l}>{(LANG_NAMES[l] ?? l.toUpperCase())} ({l})</option>
                       ))}
                     </select>
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label>Валюты</Label>
+                  <Label>{t("admin.settings.currencies")}</Label>
                   <div className="flex flex-wrap gap-2">
                     {(() => {
                       const preset = ["usd", "rub"];
@@ -749,7 +1577,7 @@ export function SettingsPage() {
                     })()}
                   </div>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Label className="text-xs text-muted-foreground">Основная валюта:</Label>
+                    <Label className="text-xs text-muted-foreground">{t("admin.settings.default_currency")}</Label>
                     <select
                       className="rounded-md border border-input bg-background px-2 py-1 text-sm"
                       value={(settings.defaultCurrency && ALLOWED_CURRENCIES.includes(settings.defaultCurrency) ? settings.defaultCurrency : ALLOWED_CURRENCIES[0]) ?? ""}
@@ -761,614 +1589,879 @@ export function SettingsPage() {
                     </select>
                   </div>
                 </div>
+                </div>
+                {/* === Безопасность === */}
+                <div className="rounded-2xl border border-rose-500/20 bg-gradient-to-br from-rose-500/5 via-red-500/5 to-pink-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-rose-500/20 flex items-center justify-center"><Shield className="h-4 w-4 text-rose-500" /></div>
+                    <h3 className="text-base font-semibold">{t("admin.settings.security")}</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("admin.settings.2fa_hint")}</p>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-muted/40 border">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="flex h-10 w-10 items-center justify-center shrink-0 rounded-xl bg-primary/10 text-primary">
+                        <KeyRound className="w-5 h-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs text-muted-foreground mb-0.5">2FA</p>
+                        <p className="font-medium text-sm truncate">{t("admin.settings.2fa_multi_level")}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {state.admin?.totpEnabled ? (
+                        <>
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-500/20 text-green-700 dark:text-green-400">{t("admin.settings.2fa_enabled")}</span>
+                          <Button type="button" variant="outline" size="sm" className="border-red-500/50 text-red-600 hover:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/20" onClick={openTwoFaDisable}>{t("admin.settings.2fa_disable")}</Button>
+                        </>
+                      ) : (
+                        <Button type="button" variant="outline" size="sm" onClick={openTwoFaEnable}>{t("admin.settings.2fa_enable")}</Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {message && <p className="text-sm text-muted-foreground">{message}</p>}
                 <Button type="submit" disabled={saving}>
-                  {saving ? "Сохранение…" : "Сохранить"}
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                 </Button>
               </CardContent>
             </Card>
+            <MarketplaceSettingsCard />
           </TabsContent>
 
           <TabsContent value="bot">
-            <Card>
-              <CardHeader>
-                <CardTitle>Настройки бота</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Порядок, видимость и подписи кнопок главного меню Telegram-бота. Кнопка «В меню» показывается на экранах тарифов, профиля и пополнения.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="space-y-2">
-                  <Label>Кнопка «В меню»</Label>
-                  <Input
-                    value={settings.botBackLabel ?? "◀️ В меню"}
-                    onChange={(e) => setSettings((s) => (s ? { ...s, botBackLabel: e.target.value || "◀️ В меню" } : s))}
-                    placeholder="◀️ В меню"
-                  />
-                  <p className="text-xs text-muted-foreground">Текст кнопки возврата в главное меню</p>
-                </div>
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-2">
-                    <MessageCircle className="h-4 w-4 text-primary" />
-                    <Label className="text-base font-medium">Поддержка</Label>
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-sky-500/10 via-indigo-500/10 to-fuchsia-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-sky-500/5 via-transparent to-fuchsia-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-sky-500/30 via-indigo-500/20 to-fuchsia-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <Bot className="h-7 w-7 text-foreground" />
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Ссылки для кнопки «Поддержка» в боте. Внутри — 4 подпункта: Тех поддержка, Соглашения, Оферта, Инструкции. Если ссылка не задана — соответствующий пункт не показывается. Кнопка «Поддержка» в главном меню отображается только если заполнен хотя бы один пункт.
-                  </p>
-                  <div className="grid gap-3 sm:grid-cols-1">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Тех поддержка (бот или контакт)</Label>
-                      <Input
-                        value={settings.supportLink ?? ""}
-                        onChange={(e) => setSettings((s) => (s ? { ...s, supportLink: e.target.value || undefined } : s))}
-                        placeholder="https://t.me/support_bot или tg://user?id=..."
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Соглашения (Telegraph и т.д.)</Label>
-                      <Input
-                        value={settings.agreementLink ?? ""}
-                        onChange={(e) => setSettings((s) => (s ? { ...s, agreementLink: e.target.value || undefined } : s))}
-                        placeholder="https://telegra.ph/..."
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Оферта</Label>
-                      <Input
-                        value={settings.offerLink ?? ""}
-                        onChange={(e) => setSettings((s) => (s ? { ...s, offerLink: e.target.value || undefined } : s))}
-                        placeholder="https://telegra.ph/..."
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Инструкции</Label>
-                      <Input
-                        value={settings.instructionsLink ?? ""}
-                        onChange={(e) => setSettings((s) => (s ? { ...s, instructionsLink: e.target.value || undefined } : s))}
-                        placeholder="https://telegra.ph/..."
-                      />
-                    </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-sky-500 via-indigo-500 to-fuchsia-500">
+                      Настройки Telegram-бота
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">
+                      Главное меню, тексты экранов, эмодзи, поведение и ссылки. Изменения подхватываются ботом автоматически после сохранения.
+                    </p>
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>Эмодзи (текст и кнопки)</Label>
-                  <p className="text-xs text-muted-foreground mb-2">
-                    Меняйте Unicode и TG ID (премиум) для каждого ключа — они подставятся в кнопки меню и в текст сообщений (если в «Тексты меню» используются плейсхолдеры вроде {'{{BALANCE}}'}). Аналог EMOJI_* / EMOJI_*_TG_ID из remnawave env.
-                  </p>
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2 rounded-md bg-amber-50 dark:bg-amber-950/40 p-2 border border-amber-200 dark:border-amber-800">
-                    Премиум-эмодзи (TG ID) отображаются только если владелец бота имеет Telegram Premium (аккаунт, создавший бота в @BotFather). Иначе в кнопках и тексте будет виден только Unicode.
-                  </p>
-                  <div className="rounded-lg border overflow-hidden">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="bg-muted/50 border-b">
-                          <th className="text-left py-2 px-3 font-medium">Ключ</th>
-                          <th className="text-left py-2 px-3 font-medium w-24">Unicode</th>
-                          <th className="text-left py-2 px-3 font-medium">TG ID (премиум)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {BOT_EMOJI_KEYS.map((key) => {
-                          const raw = (settings.botEmojis ?? {})[key];
-                          const entry = typeof raw === "object" && raw !== null ? raw : { unicode: typeof raw === "string" ? raw : undefined, tgEmojiId: undefined };
-                          return (
-                            <tr key={key} className="border-b border-border/50 hover:bg-muted/20">
-                              <td className="py-1.5 px-3 font-medium">{key}</td>
-                              <td className="py-1.5 px-2">
-                                <Input
-                                  className="h-8 w-20 p-1 text-center text-base"
-                                  value={entry.unicode ?? ""}
-                                  onChange={(e) =>
-                                    setSettings((s) => {
-                                      if (!s) return s;
-                                      const prev = (s.botEmojis ?? {})[key];
-                                      const prevObj = typeof prev === "object" && prev !== null ? prev : { unicode: typeof prev === "string" ? prev : undefined, tgEmojiId: undefined };
-                                      return {
-                                        ...s,
-                                        botEmojis: {
-                                          ...(s.botEmojis ?? {}),
-                                          [key]: { ...prevObj, unicode: e.target.value || undefined },
-                                        },
-                                      };
-                                    })
-                                  }
-                                  placeholder="📦"
-                                />
-                              </td>
-                              <td className="py-1.5 px-2">
-                                <Input
-                                  className="h-8 min-w-0 text-xs"
-                                  value={entry.tgEmojiId ?? ""}
-                                  onChange={(e) =>
-                                    setSettings((s) => {
-                                      if (!s) return s;
-                                      const prev = (s.botEmojis ?? {})[key];
-                                      const prevObj = typeof prev === "object" && prev !== null ? prev : { unicode: typeof prev === "string" ? prev : undefined, tgEmojiId: undefined };
-                                      return {
-                                        ...s,
-                                        botEmojis: {
-                                          ...(s.botEmojis ?? {}),
-                                          [key]: { ...prevObj, tgEmojiId: e.target.value || undefined },
-                                        },
-                                      };
-                                    })
-                                  }
-                                  placeholder="5289722755871162900"
-                                />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>Кнопки главного меню</Label>
-                  <p className="text-xs text-muted-foreground mb-3">
-                    Отметьте видимость, измените текст, выберите эмодзи по ключу (из блока выше), задайте порядок. Стиль: primary / success / danger или пусто.
-                  </p>
-                  <div className="flex flex-wrap items-center gap-4 mb-4">
-                    <div className="flex items-center gap-2">
-                      <Label htmlFor="bot-buttons-per-row" className="text-sm whitespace-nowrap">Кнопок в ряд:</Label>
-                      <select
-                        id="bot-buttons-per-row"
-                        className="flex h-9 w-24 rounded-md border border-input bg-background px-2 py-1 text-sm"
-                        value={settings.botButtonsPerRow ?? 1}
-                        onChange={(e) =>
-                          setSettings((s) =>
-                            s ? { ...s, botButtonsPerRow: e.target.value === "2" ? 2 : 1 } : s
-                          )
-                        }
-                      >
-                        <option value={1}>1 (по одной)</option>
-                        <option value={2}>2 (по две)</option>
-                      </select>
+              </div>
+              <CardContent className="p-4 sm:p-6 space-y-6">
+                <Tabs value={botSubTab} onValueChange={(v) => setBotSubTab(v as typeof botSubTab)}>
+                  <TabsList className="w-full grid grid-cols-2 sm:grid-cols-5 gap-1.5 p-1.5 h-auto bg-muted/40 rounded-2xl border">
+                    <TabsTrigger value="menu" className="gap-2 py-2.5 px-3 rounded-xl data-[state=active]:bg-gradient-to-r data-[state=active]:from-sky-500 data-[state=active]:to-blue-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+                      <Layers className="h-4 w-4 shrink-0" /><span className="text-xs sm:text-sm">Меню</span>
+                    </TabsTrigger>
+                    <TabsTrigger value="texts" className="gap-2 py-2.5 px-3 rounded-xl data-[state=active]:bg-gradient-to-r data-[state=active]:from-violet-500 data-[state=active]:to-purple-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+                      <MessageSquare className="h-4 w-4 shrink-0" /><span className="text-xs sm:text-sm">Тексты</span>
+                    </TabsTrigger>
+                    <TabsTrigger value="emoji" className="gap-2 py-2.5 px-3 rounded-xl data-[state=active]:bg-gradient-to-r data-[state=active]:from-amber-500 data-[state=active]:to-orange-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+                      <Smile className="h-4 w-4 shrink-0" /><span className="text-xs sm:text-sm">Эмодзи</span>
+                    </TabsTrigger>
+                    <TabsTrigger value="behavior" className="gap-2 py-2.5 px-3 rounded-xl data-[state=active]:bg-gradient-to-r data-[state=active]:from-emerald-500 data-[state=active]:to-teal-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+                      <Sliders className="h-4 w-4 shrink-0" /><span className="text-xs sm:text-sm">Поведение</span>
+                    </TabsTrigger>
+                    <TabsTrigger value="links" className="gap-2 py-2.5 px-3 rounded-xl data-[state=active]:bg-gradient-to-r data-[state=active]:from-rose-500 data-[state=active]:to-pink-500 data-[state=active]:text-white data-[state=active]:shadow-md">
+                      <Link2 className="h-4 w-4 shrink-0" /><span className="text-xs sm:text-sm">Ссылки</span>
+                    </TabsTrigger>
+                  </TabsList>
+
+                  {/* === ВКЛАДКА: МЕНЮ === */}
+                  <TabsContent value="menu" className="space-y-5 mt-5">
+                    <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-500/5 via-blue-500/5 to-indigo-500/5 p-5 space-y-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-sky-500/20 flex items-center justify-center"><ArrowLeftRight className="h-4 w-4 text-sky-500" /></div>
+                        <h3 className="text-base font-semibold">Кнопка возврата</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">Текст кнопки, которая возвращает в <b>главное меню</b> бота (на предыдущий экран ведёт отдельная кнопка «Назад»). Появляется почти на всех экранах.</p>
+                      <Input
+                        value={settings.botBackLabel ?? "◀️ В меню"}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, botBackLabel: e.target.value || "◀️ В меню" } : s))}
+                        placeholder="◀️ В меню"
+                      />
                     </div>
-                    <span className="text-xs text-muted-foreground">По умолчанию: по одной кнопке в ряд, как сейчас.</span>
-                  </div>
-                  <div className="space-y-3">
-                    {[...(settings.botButtons ?? DEFAULT_BOT_BUTTONS)]
-                      .sort((a, b) => a.order - b.order)
-                      .map((btn, idx) => (
-                        <div key={btn.id} className="flex flex-wrap items-center gap-3 p-3 rounded-lg border bg-muted/30">
-                          <Switch
-                            checked={btn.visible}
-                            onCheckedChange={(checked: boolean) =>
-                              setSettings((s) => {
-                                if (!s?.botButtons) return s;
-                                return {
-                                  ...s,
-                                  botButtons: s.botButtons.map((b) =>
-                                    b.id === btn.id ? { ...b, visible: checked === true } : b
-                                  ),
-                                };
-                              })
-                            }
-                          />
-                          <Input
-                            className="w-32 flex-shrink-0"
-                            type="number"
-                            min={0}
-                            step="any"
-                            value={btn.order}
-                            onChange={(e) =>
-                              setSettings((s) => {
-                                if (!s?.botButtons) return s;
-                                const v = parseFloat(e.target.value.replace(",", "."));
-                                if (!Number.isFinite(v) || v < 0) return s;
-                                return {
-                                  ...s,
-                                  botButtons: s.botButtons.map((b) =>
-                                    b.id === btn.id ? { ...b, order: v } : b
-                                  ),
-                                };
-                              })
-                            }
-                          />
-                          <span className="text-xs text-muted-foreground w-8">{idx + 1}</span>
-                          <Input
-                            className="flex-1 min-w-[140px]"
-                            value={btn.label}
-                            onChange={(e) =>
-                              setSettings((s) => {
-                                if (!s?.botButtons) return s;
-                                return {
-                                  ...s,
-                                  botButtons: s.botButtons.map((b) =>
-                                    b.id === btn.id ? { ...b, label: e.target.value } : b
-                                  ),
-                                };
-                              })
-                            }
-                            placeholder="Текст кнопки"
-                          />
-                          <select
-                            className="flex h-9 w-28 rounded-md border border-input bg-background px-2 py-1 text-sm"
-                            value={btn.emojiKey ?? ""}
-                            onChange={(e) =>
-                              setSettings((s) => {
-                                if (!s?.botButtons) return s;
-                                return {
-                                  ...s,
-                                  botButtons: s.botButtons.map((b) =>
-                                    b.id === btn.id ? { ...b, emojiKey: e.target.value } : b
-                                  ),
-                                };
-                              })
-                            }
-                          >
-                            <option value="">— без эмодзи —</option>
-                            {BOT_EMOJI_KEYS.map((k) => (
-                              <option key={k} value={k}>{k}</option>
-                            ))}
-                          </select>
-                          <select
-                            className="flex h-9 w-24 rounded-md border border-input bg-background px-2 py-1 text-sm"
-                            value={btn.style ?? ""}
-                            onChange={(e) =>
-                              setSettings((s) => {
-                                if (!s?.botButtons) return s;
-                                return {
-                                  ...s,
-                                  botButtons: s.botButtons.map((b) =>
-                                    b.id === btn.id ? { ...b, style: e.target.value } : b
-                                  ),
-                                };
-                              })
-                            }
-                          >
-                            <option value="">—</option>
-                            <option value="primary">primary</option>
-                            <option value="success">success</option>
-                            <option value="danger">danger</option>
-                          </select>
-                          <div className="flex items-center gap-1.5">
-                            <Switch
-                              id={`onePerRow-${btn.id}`}
-                              checked={btn.onePerRow === true}
-                              onCheckedChange={(checked: boolean) =>
-                                setSettings((s) => {
-                                  if (!s?.botButtons) return s;
-                                  return {
-                                    ...s,
-                                    botButtons: s.botButtons.map((b) =>
-                                      b.id === btn.id ? { ...b, onePerRow: checked === true } : b
-                                    ),
-                                  };
-                                })
-                              }
-                            />
-                            <Label htmlFor={`onePerRow-${btn.id}`} className="text-xs cursor-pointer whitespace-nowrap">В один ряд</Label>
-                          </div>
-                          <span className="text-xs text-muted-foreground capitalize">{btn.id}</span>
-                        </div>
-                      ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    «В один ряд» — кнопка всегда в отдельной строке. Остальные кнопки выстраиваются по настройке «Кнопок в ряд» выше.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label>Стили внутренних кнопок бота</Label>
-                  <p className="text-xs text-muted-foreground mb-2">
-                    Цвет кнопок внутри разделов: тарифы, пополнение, «Назад», профиль, триал, язык, валюта. Значения: primary / success / danger или пусто.
-                  </p>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {[
-                      { key: "tariffPay", label: "Кнопки тарифов (оплата)" },
-                      { key: "topup", label: "Кнопки сумм пополнения" },
-                      { key: "back", label: "Кнопка «Назад» / «В меню»" },
-                      { key: "profile", label: "Кнопки в профиле (язык, валюта)" },
-                      { key: "trialConfirm", label: "Кнопка «Активировать триал»" },
-                      { key: "lang", label: "Выбор языка" },
-                      { key: "currency", label: "Выбор валюты" },
-                    ].map(({ key, label }) => (
-                      <div key={key} className="flex items-center gap-2">
-                        <span className="text-sm w-48 shrink-0">{label}</span>
+
+                    {/* редактирование текстов
+                        экранов бота вынесено в отдельный редактор «Тексты экранов бота» —
+                        чтобы не дублировать настройку в двух местах. */}
+                    <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-500/5 via-blue-500/5 to-indigo-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-blue-500/20 flex items-center justify-center"><Layers className="h-4 w-4 text-blue-500" /></div>
+                        <h3 className="text-base font-semibold">Кнопки главного меню</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">Переименуй, скрой или поменяй порядок кнопок главного меню. Каждой кнопке можно задать иконку (эмодзи), цвет и режим «во всю ширину».</p>
+                      <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-background/40 border border-white/5">
+                        <Label htmlFor="bot-buttons-per-row" className="text-sm font-medium">Кнопок в ряд:</Label>
                         <select
-                          className="flex h-9 flex-1 max-w-[120px] rounded-md border border-input bg-background px-2 py-1 text-sm"
-                          value={(settings.botInnerButtonStyles ?? {})[key] ?? ""}
+                          id="bot-buttons-per-row"
+                          className="flex h-9 rounded-lg border border-input bg-background px-3 py-1 text-sm"
+                          value={settings.botButtonsPerRow ?? 1}
                           onChange={(e) =>
-                            setSettings((s) => {
-                              if (!s) return s;
-                              const next = { ...DEFAULT_BOT_INNER_STYLES, ...(s.botInnerButtonStyles ?? {}), [key]: e.target.value };
-                              return { ...s, botInnerButtonStyles: next };
-                            })
+                            setSettings((s) => (s ? { ...s, botButtonsPerRow: e.target.value === "2" ? 2 : 1 } : s))
                           }
                         >
-                          <option value="">—</option>
-                          <option value="primary">primary</option>
-                          <option value="success">success</option>
-                          <option value="danger">danger</option>
+                          <option value={1}>1 — по одной</option>
+                          <option value={2}>2 — парами</option>
                         </select>
+                        <span className="text-xs text-muted-foreground">Глобально для всего меню (отдельные кнопки можно вытолкнуть в свою строку флагом ниже)</span>
                       </div>
-                    ))}
-                  </div>
-                </div>
-                <Collapsible>
-                  <CollapsibleTrigger asChild>
-                    <Button type="button" variant="outline" className="w-full justify-between">
-                      Тексты приветствия и главного меню
-                      <ChevronDown className="h-4 w-4" />
-                    </Button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <div className="pt-3 space-y-3 border-t mt-3">
-                      <p className="text-xs text-muted-foreground">
-                        Подписи и фразы главного меню бота. Чтобы подставлять эмодзи из блока «Эмодзи (текст и кнопки)», используйте плейсхолдеры: <code className="rounded bg-muted px-1">{'{{BALANCE}}'}</code>, <code className="rounded bg-muted px-1">{'{{STATUS}}'}</code>, <code className="rounded bg-muted px-1">{'{{TRIAL}}'}</code>, <code className="rounded bg-muted px-1">{'{{LINK}}'}</code>, <code className="rounded bg-muted px-1">{'{{DATE}}'}</code>, <code className="rounded bg-muted px-1">{'{{TRAFFIC}}'}</code> и др. (ключи как в списке эмодзи выше, например <code className="rounded bg-muted px-1">{'{{CUSTOM_1}}'}</code>). Unicode подставится автоматически; TG ID используется для премиум-эмодзи в тексте и кнопках.
+                      <BotButtonsList
+                        buttons={[...(settings.botButtons ?? DEFAULT_BOT_BUTTONS)].sort((a, b) => a.order - b.order)}
+                        onChange={(updated) => setSettings((s) => (s ? { ...s, botButtons: updated } : s))}
+                      />
+                      <p className="text-xs text-muted-foreground rounded-lg bg-background/40 border border-white/5 p-2.5 flex items-start gap-2">
+                        <span className="text-base">💡</span>
+                        <span>Перетаскивайте кнопки за ⋮⋮ ручку слева, чтобы менять порядок. «Во всю ширину» вытолкнет кнопку на отдельную строку даже в режиме 2-колоночного меню.</span>
                       </p>
-                      <div className="space-y-2 rounded-lg border p-3 bg-background/60">
+                    </div>
+                  </TabsContent>
+
+                  {/* === ВКЛАДКА: ЭМОДЗИ === */}
+                  <TabsContent value="emoji" className="space-y-5 mt-5">
+                    <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/5 via-orange-500/5 to-rose-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-amber-500/20 flex items-center justify-center"><Smile className="h-4 w-4 text-amber-500" /></div>
+                        <h3 className="text-base font-semibold">Эмодзи и премиум-иконки</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_emojis_hint")}</p>
+                      <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+                        <Sparkles className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                        <p className="text-xs text-amber-700 dark:text-amber-300">{t("admin.settings.bot_emojis_premium_warn")}</p>
+                      </div>
+                      <div className="rounded-xl border border-white/10 overflow-hidden bg-card/40">
+                        <div className="grid grid-cols-[1fr_90px_1fr] gap-0 text-xs font-semibold uppercase tracking-wider text-muted-foreground bg-muted/40 border-b border-white/10">
+                          <div className="py-2.5 px-3">Назначение</div>
+                          <div className="py-2.5 px-2 text-center">Unicode</div>
+                          <div className="py-2.5 px-3">Premium ID (Telegram)</div>
+                        </div>
+                        <div className="divide-y divide-white/5">
+                          {BOT_EMOJI_KEYS.map((key) => {
+                            const raw = (settings.botEmojis ?? {})[key];
+                            const entry = typeof raw === "object" && raw !== null ? raw : { unicode: typeof raw === "string" ? raw : undefined, tgEmojiId: undefined };
+                            return (
+                              <div key={key} className="grid grid-cols-[1fr_90px_1fr] gap-0 items-center hover:bg-muted/20 transition-colors">
+                                <div className="py-2 px-3">
+                                  <div className="text-sm font-medium">{BOT_EMOJI_LABELS[key] ?? key}</div>
+                                  <div className="text-[10px] text-muted-foreground font-mono">{key}</div>
+                                </div>
+                                <div className="py-2 px-2">
+                                  <Input
+                                    className="h-9 w-full p-1 text-center text-base"
+                                    value={entry.unicode ?? ""}
+                                    onChange={(e) =>
+                                      setSettings((s) => {
+                                        if (!s) return s;
+                                        const prev = (s.botEmojis ?? {})[key];
+                                        const prevObj = typeof prev === "object" && prev !== null ? prev : { unicode: typeof prev === "string" ? prev : undefined, tgEmojiId: undefined };
+                                        return { ...s, botEmojis: { ...(s.botEmojis ?? {}), [key]: { ...prevObj, unicode: e.target.value || undefined } } };
+                                      })
+                                    }
+                                    placeholder="📦"
+                                  />
+                                </div>
+                                <div className="py-2 px-3">
+                                  <Input
+                                    className="h-9 min-w-0 text-xs font-mono"
+                                    value={entry.tgEmojiId ?? ""}
+                                    onChange={(e) =>
+                                      setSettings((s) => {
+                                        if (!s) return s;
+                                        const prev = (s.botEmojis ?? {})[key];
+                                        const prevObj = typeof prev === "object" && prev !== null ? prev : { unicode: typeof prev === "string" ? prev : undefined, tgEmojiId: undefined };
+                                        return { ...s, botEmojis: { ...(s.botEmojis ?? {}), [key]: { ...prevObj, tgEmojiId: e.target.value || undefined } } };
+                                      })
+                                    }
+                                    placeholder="5289722755871162900"
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/5 via-orange-500/5 to-rose-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-orange-500/20 flex items-center justify-center"><Palette className="h-4 w-4 text-orange-500" /></div>
+                        <h3 className="text-base font-semibold">Цвета вторичных кнопок</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_inner_styles_hint")}</p>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {Object.keys(BOT_INNER_STYLE_LABELS).map((key) => {
+                          const meta = BOT_INNER_STYLE_LABELS[key]!;
+                          const currentVal = (settings.botInnerButtonStyles ?? {})[key] ?? "";
+                          const swatch = BOT_STYLE_OPTIONS.find((o) => o.value === currentVal)?.swatch ?? "bg-muted";
+                          return (
+                            <div key={key} className="flex items-center gap-3 p-3 rounded-xl border border-white/10 bg-card/40">
+                              <div className={`h-3 w-3 rounded-full ${swatch} shrink-0 ring-2 ring-white/10`} />
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-medium truncate">{meta.label}</div>
+                                <div className="text-[11px] text-muted-foreground truncate">{meta.desc}</div>
+                              </div>
+                              <select
+                                className="flex h-9 w-32 shrink-0 rounded-md border border-input bg-background px-2 py-1 text-sm"
+                                value={currentVal}
+                                onChange={(e) =>
+                                  setSettings((s) => {
+                                    if (!s) return s;
+                                    const next = { ...DEFAULT_BOT_INNER_STYLES, ...(s.botInnerButtonStyles ?? {}), [key]: e.target.value };
+                                    return { ...s, botInnerButtonStyles: next };
+                                  })
+                                }
+                              >
+                                {BOT_STYLE_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  {/* === ВКЛАДКА: ТЕКСТЫ === */}
+                  <TabsContent value="texts" className="space-y-5 mt-5">
+                    {/* ═══ Приветственное сообщение при /start ═══ */}
+                    <div className="rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 via-teal-500/5 to-cyan-500/5 p-5 space-y-4">
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-8 w-8 rounded-xl bg-emerald-500/20 flex items-center justify-center">✨</div>
+                          <div>
+                            <h3 className="text-base font-semibold">Приветственное сообщение</h3>
+                            <p className="text-xs text-muted-foreground">Показывается клиенту при первом /start. Картинка-баннер + текст + кнопка «Войти».</p>
+                          </div>
+                        </div>
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                          <Switch
+                            checked={settings.botWelcomeEnabled ?? false}
+                            onCheckedChange={(checked: boolean) => setSettings((s) => (s ? { ...s, botWelcomeEnabled: checked === true } : s))}
+                          />
+                          <span className="text-sm">Включить</span>
+                        </label>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-card/40 p-4 space-y-3">
+                        <div className="space-y-2">
+                          <Label className="text-xs">Текст приветствия</Label>
+                          <textarea
+                            className="w-full min-h-[160px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            value={settings.botWelcomeText ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, botWelcomeText: e.target.value || null } : s))}
+                            placeholder={"Добро пожаловать в VPN!\n\n🚀 Высокая скорость\n🚫 Удаляем рекламу\n♾ Огромный запас трафика\n👥 Платим 30% с платежей друзей"}
+                            maxLength={4000}
+                          />
+                          <p className="text-[10px] text-muted-foreground">До 4000 символов. Эмодзи поддерживаются. Если задана картинка — текст идёт как caption (макс. 1024 символа в Telegram).</p>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs">Картинка-баннер (PNG / JPG / GIF / WEBP, до 5 МБ)</Label>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            {settings.botWelcomeImage && (
+                              <img
+                                src={settings.botWelcomeImage}
+                                alt="welcome"
+                                className="h-28 w-auto rounded-md border border-white/10 object-cover"
+                              />
+                            )}
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/gif,image/webp"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (!f) return;
+                                if (f.size > 5_000_000) {
+                                  alert("Файл больше 5 МБ — попробуйте сжать.");
+                                  return;
+                                }
+                                const reader = new FileReader();
+                                reader.onload = () => {
+                                  const url = String(reader.result || "");
+                                  setSettings((s) => (s ? { ...s, botWelcomeImage: url } : s));
+                                };
+                                reader.readAsDataURL(f);
+                              }}
+                              className="text-xs"
+                            />
+                            {settings.botWelcomeImage && (
+                              <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, botWelcomeImage: null } : s))}>
+                                Убрать картинку
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        <label className="inline-flex items-center gap-2 cursor-pointer text-xs pt-2 border-t border-white/5">
+                          <Switch
+                            checked={settings.botWelcomeShowOnce ?? true}
+                            onCheckedChange={(checked: boolean) => setSettings((s) => (s ? { ...s, botWelcomeShowOnce: checked === true } : s))}
+                          />
+                          <span>Показывать только при первом /start (пока клиент не нажал «Войти в кабинет»)</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-violet-500/20 flex items-center justify-center"><MessageSquare className="h-4 w-4 text-violet-500" /></div>
+                        <h3 className="text-base font-semibold">Главное меню — содержимое</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_welcome_hint")}</p>
+                      <div className="rounded-xl border border-white/10 bg-card/40 p-4 space-y-3">
                         <div className="flex items-center justify-between gap-2">
-                          <Label className="text-sm">Видимость строк приветствия</Label>
+                          <div className="flex items-center gap-2">
+                            <Eye className="h-4 w-4 text-violet-500" />
+                            <Label className="text-sm font-medium">Какие строки показывать</Label>
+                          </div>
                           <Button
                             type="button"
                             variant="secondary"
                             size="sm"
                             onClick={() => setSettings((s) => (s ? { ...s, botMenuLineVisibility: { ...DEFAULT_BOT_MENU_LINE_VISIBILITY } } : s))}
                           >
-                            Сбросить видимость
+                            <RotateCw className="h-3.5 w-3.5 mr-1" />Сброс
                           </Button>
                         </div>
                         <div className="grid gap-2 sm:grid-cols-2">
-                          {Object.keys(DEFAULT_BOT_MENU_LINE_VISIBILITY).map((key) => (
-                            <div key={key} className="flex items-center gap-2">
-                              <Switch
-                                checked={(settings.botMenuLineVisibility ?? DEFAULT_BOT_MENU_LINE_VISIBILITY)[key] !== false}
-                                onCheckedChange={(checked: boolean) =>
-                                  setSettings((s) =>
-                                    s
-                                      ? {
-                                          ...s,
-                                          botMenuLineVisibility: {
-                                            ...(s.botMenuLineVisibility ?? DEFAULT_BOT_MENU_LINE_VISIBILITY),
-                                            [key]: checked === true,
-                                          },
-                                        }
-                                      : s
-                                  )
-                                }
-                              />
-                              <Label className="text-xs">{BOT_MENU_LINE_LABELS[key] ?? key}</Label>
-                            </div>
-                          ))}
+                          {Object.keys(DEFAULT_BOT_MENU_LINE_VISIBILITY).map((key) => {
+                            const visible = (settings.botMenuLineVisibility ?? DEFAULT_BOT_MENU_LINE_VISIBILITY)[key] !== false;
+                            return (
+                              <label key={key} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-muted/30 cursor-pointer transition-colors">
+                                <Switch
+                                  checked={visible}
+                                  onCheckedChange={(checked: boolean) =>
+                                    setSettings((s) =>
+                                      s ? { ...s, botMenuLineVisibility: { ...(s.botMenuLineVisibility ?? DEFAULT_BOT_MENU_LINE_VISIBILITY), [key]: checked === true } } : s
+                                    )
+                                  }
+                                />
+                                <span className="text-sm">{BOT_MENU_LINE_LABELS[key] ?? key}</span>
+                              </label>
+                            );
+                          })}
                         </div>
                       </div>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => setSettings((s) => (s ? { ...s, botMenuTexts: { ...DEFAULT_BOT_MENU_TEXTS } } : s))}
-                      >
-                        Сбросить тексты к стандарту
-                      </Button>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        {Object.keys(DEFAULT_BOT_MENU_TEXTS).map((key) => (
-                          <div key={key} className="space-y-1">
-                            <Label className="text-xs">{BOT_MENU_TEXT_LABELS[key] ?? key}</Label>
-                            <Input
-                              value={settings.botMenuTexts?.[key] ?? DEFAULT_BOT_MENU_TEXTS[key] ?? ""}
-                              onChange={(e) =>
-                                setSettings((s) =>
-                                  s
-                                    ? {
-                                        ...s,
-                                        botMenuTexts: {
-                                          ...(s.botMenuTexts ?? DEFAULT_BOT_MENU_TEXTS),
-                                          [key]: e.target.value,
-                                        },
-                                      }
-                                    : s
-                                )
-                              }
-                              placeholder={DEFAULT_BOT_MENU_TEXTS[key]}
-                            />
+                      <Collapsible>
+                        <CollapsibleTrigger asChild>
+                          <Button type="button" variant="outline" className="w-full justify-between rounded-xl">
+                            <span className="flex items-center gap-2"><FileText className="h-4 w-4" />Тексты строк меню</span>
+                            <ChevronDown className="h-4 w-4" />
+                          </Button>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                          <div className="pt-3 space-y-3 border-t mt-3">
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => setSettings((s) => (s ? { ...s, botMenuTexts: { ...DEFAULT_BOT_MENU_TEXTS } } : s))}
+                            >
+                              <RotateCw className="h-3.5 w-3.5 mr-1" />Сбросить тексты
+                            </Button>
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              {Object.keys(DEFAULT_BOT_MENU_TEXTS).map((key) => (
+                                <div key={key} className="space-y-1">
+                                  <Label className="text-xs">{BOT_MENU_TEXT_LABELS[key] ?? key}</Label>
+                                  <Input
+                                    value={settings.botMenuTexts?.[key] ?? DEFAULT_BOT_MENU_TEXTS[key] ?? ""}
+                                    onChange={(e) =>
+                                      setSettings((s) =>
+                                        s ? { ...s, botMenuTexts: { ...(s.botMenuTexts ?? DEFAULT_BOT_MENU_TEXTS), [key]: e.target.value } } : s
+                                      )
+                                    }
+                                    placeholder={DEFAULT_BOT_MENU_TEXTS[key]}
+                                  />
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        ))}
+                        </CollapsibleContent>
+                      </Collapsible>
+                    </div>
+
+                    <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-purple-500/20 flex items-center justify-center"><Package className="h-4 w-4 text-purple-500" /></div>
+                        <h3 className="text-base font-semibold">Экран «Тарифы»</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_tariffs_hint")}</p>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Шаблон сообщения</Label>
+                        <Textarea
+                          rows={6}
+                          value={settings.botTariffsText ?? DEFAULT_BOT_TARIFFS_TEXT}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, botTariffsText: e.target.value } : s))}
+                          placeholder={DEFAULT_BOT_TARIFFS_TEXT}
+                          className="font-mono text-xs"
+                        />
+                        <p className="text-[11px] text-muted-foreground">Доступные плейсхолдеры: <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{CATEGORY}}`}</code> — название категории, <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{TARIFFS}}`}</code> — список тарифов</p>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-card/40 p-4 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-sm font-medium">Поля в карточке тарифа</Label>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setSettings((s) => (s ? { ...s, botTariffsFields: { ...DEFAULT_BOT_TARIFF_FIELDS } } : s))}
+                          >
+                            <RotateCw className="h-3.5 w-3.5 mr-1" />Сброс
+                          </Button>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {Object.keys(DEFAULT_BOT_TARIFF_FIELDS).map((key) => {
+                            const enabled = (settings.botTariffsFields ?? DEFAULT_BOT_TARIFF_FIELDS)[key] !== false;
+                            return (
+                              <label key={key} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-muted/30 cursor-pointer transition-colors">
+                                <Switch
+                                  checked={enabled}
+                                  onCheckedChange={(checked: boolean) =>
+                                    setSettings((s) =>
+                                      s ? { ...s, botTariffsFields: { ...(s.botTariffsFields ?? DEFAULT_BOT_TARIFF_FIELDS), [key]: checked === true } } : s
+                                    )
+                                  }
+                                />
+                                <span className="text-sm">{BOT_TARIFF_FIELD_LABELS[key] ?? key}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
-                  </CollapsibleContent>
-                </Collapsible>
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-2">
-                    <Package className="h-4 w-4 text-primary" />
-                    <Label className="text-base font-medium">Экран тарифов</Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Текст, который видит пользователь в разделе «Тарифы». Используйте плейсхолдеры: <code className="rounded bg-muted px-1">{'{{CATEGORY}}'}</code> — название категории, <code className="rounded bg-muted px-1">{'{{TARIFFS}}'}</code> — список тарифов. Для эмодзи — ключи из блока «Эмодзи», например <code className="rounded bg-muted px-1">{'{{CUSTOM_1}}'}</code>.
-                  </p>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Текст сообщения</Label>
-                    <Textarea
-                      rows={6}
-                      value={settings.botTariffsText ?? DEFAULT_BOT_TARIFFS_TEXT}
-                      onChange={(e) => setSettings((s) => (s ? { ...s, botTariffsText: e.target.value } : s))}
-                      placeholder={DEFAULT_BOT_TARIFFS_TEXT}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <Label className="text-sm">Что показывать в строке тарифа</Label>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setSettings((s) => (s ? { ...s, botTariffsFields: { ...DEFAULT_BOT_TARIFF_FIELDS } } : s))}
-                    >
-                      Сбросить поля
-                    </Button>
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {Object.keys(DEFAULT_BOT_TARIFF_FIELDS).map((key) => (
-                      <div key={key} className="flex items-center gap-2">
+
+                    <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-fuchsia-500/20 flex items-center justify-center"><CreditCard className="h-4 w-4 text-fuchsia-500" /></div>
+                        <h3 className="text-base font-semibold">Окно оплаты</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_payment_hint")}</p>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Шаблон сообщения оплаты</Label>
+                        <Textarea
+                          rows={5}
+                          value={settings.botPaymentText ?? DEFAULT_BOT_PAYMENT_TEXT}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, botPaymentText: e.target.value } : s))}
+                          placeholder={DEFAULT_BOT_PAYMENT_TEXT}
+                          className="font-mono text-xs"
+                        />
+                        <p className="text-[11px] text-muted-foreground">Плейсхолдеры: <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{NAME}}`}</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{PRICE}}`}</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{AMOUNT}}`}</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{CURRENCY}}`}</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">{`{{ACTION}}`}</code></p>
+                      </div>
+                    </div>
+                  </TabsContent>
+                  {/* === ВКЛАДКА: ПОВЕДЕНИЕ === */}
+                  <TabsContent value="behavior" className="space-y-5 mt-5">
+                    <div className="rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 via-teal-500/5 to-cyan-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-emerald-500/20 flex items-center justify-center"><Megaphone className="h-4 w-4 text-emerald-500" /></div>
+                        <h3 className="text-base font-semibold">Инфо-блок (объявления)</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Произвольный текст, который показывается в главном меню бота и в кабинете клиента.
+                        Используй для объявлений тех. работ, акций, контактов поддержки. Скрывается если поле пустое.
+                      </p>
+                      <Textarea
+                        value={settings.botInfoBlock ?? ""}
+                        onChange={(e) =>
+                          setSettings((s) => (s ? { ...s, botInfoBlock: e.target.value.length ? e.target.value : null } : s))
+                        }
+                        rows={4}
+                        maxLength={2000}
+                        placeholder="📢 Тех. работы 12.05 с 03:00 до 05:00 МСК&#10;💬 Поддержка: @support_bot"
+                      />
+                      <p className="text-[11px] text-muted-foreground text-right">{(settings.botInfoBlock ?? "").length} / 2000</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 via-teal-500/5 to-cyan-500/5 p-5 space-y-4">
+                      <div className="flex items-start gap-3">
+                        <div className="h-8 w-8 rounded-xl bg-teal-500/20 flex items-center justify-center shrink-0"><Trash className="h-4 w-4 text-teal-500" /></div>
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-base font-semibold mb-1">Авто-удаление нераспознанных сообщений</h3>
+                          <p className="text-xs text-muted-foreground">
+                            Бот удаляет сообщения, которые не команды и не активный ввод (стикеры, случайный текст, фото).
+                            Чат остаётся чистым. Требует право «Delete messages» у бота.
+                          </p>
+                        </div>
                         <Switch
-                          checked={(settings.botTariffsFields ?? DEFAULT_BOT_TARIFF_FIELDS)[key] !== false}
+                          checked={!!settings.botAutoDeleteUnknownMessages}
                           onCheckedChange={(checked: boolean) =>
-                            setSettings((s) =>
-                              s
-                                ? {
-                                    ...s,
-                                    botTariffsFields: {
-                                      ...(s.botTariffsFields ?? DEFAULT_BOT_TARIFF_FIELDS),
-                                      [key]: checked === true,
-                                    },
-                                  }
-                                : s
-                            )
+                            setSettings((s) => (s ? { ...s, botAutoDeleteUnknownMessages: checked === true } : s))
                           }
                         />
-                        <Label className="text-xs">{BOT_TARIFF_FIELD_LABELS[key] ?? key}</Label>
                       </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-2">
-                    <CreditCard className="h-4 w-4 text-primary" />
-                    <Label className="text-base font-medium">Окно оплаты</Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Текст окна «Оплата». Плейсхолдеры: <code className="rounded bg-muted px-1">{'{{NAME}}'}</code> — название тарифа/опции, <code className="rounded bg-muted px-1">{'{{PRICE}}'}</code> — цена с валютой, <code className="rounded bg-muted px-1">{'{{AMOUNT}}'}</code> — число, <code className="rounded bg-muted px-1">{'{{CURRENCY}}'}</code> — валюта, <code className="rounded bg-muted px-1">{'{{ACTION}}'}</code> — строка действия. Для эмодзи — ключи из блока «Эмодзи», например <code className="rounded bg-muted px-1">{'{{CUSTOM_1}}'}</code>.
-                  </p>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Текст сообщения</Label>
-                    <Textarea
-                      rows={5}
-                      value={settings.botPaymentText ?? DEFAULT_BOT_PAYMENT_TEXT}
-                      onChange={(e) => setSettings((s) => (s ? { ...s, botPaymentText: e.target.value } : s))}
-                      placeholder={DEFAULT_BOT_PAYMENT_TEXT}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-3 rounded-lg border p-4 bg-muted/20">
-                  <div className="flex items-center gap-2">
-                    <Users className="h-4 w-4 text-primary" />
-                    <Label className="text-base font-medium">Принудительная подписка на канал</Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Если включено — пользователь не сможет пользоваться ботом, пока не подпишется на указанный канал/группу. Бот должен быть администратором канала/группы.
-                  </p>
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      checked={!!settings.forceSubscribeEnabled}
-                      onCheckedChange={(checked: boolean) =>
-                        setSettings((s) => (s ? { ...s, forceSubscribeEnabled: checked === true } : s))
-                      }
-                    />
-                    <Label className="text-sm">Включить проверку подписки</Label>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">ID или @username канала/группы</Label>
-                    <Input
-                      value={settings.forceSubscribeChannelId ?? ""}
-                      onChange={(e) => setSettings((s) => (s ? { ...s, forceSubscribeChannelId: e.target.value || null } : s))}
-                      placeholder="@channelname или -1001234567890"
-                    />
-                    <p className="text-xs text-muted-foreground">Укажите @username (например @my_channel) или числовой ID канала/группы.</p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Сообщение для неподписанных</Label>
-                    <Input
-                      value={settings.forceSubscribeMessage ?? ""}
-                      onChange={(e) => setSettings((s) => (s ? { ...s, forceSubscribeMessage: e.target.value || null } : s))}
-                      placeholder="Для использования бота подпишитесь на наш канал"
-                    />
-                    <p className="text-xs text-muted-foreground">Текст, который увидит пользователь. Если пусто — будет использован текст по умолчанию.</p>
-                  </div>
-                </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 via-teal-500/5 to-cyan-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-cyan-500/20 flex items-center justify-center"><Bell className="h-4 w-4 text-cyan-500" /></div>
+                        <h3 className="text-base font-semibold">Обязательная подписка на канал</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_force_hint")}</p>
+                      <div className="flex items-center gap-3 p-3 rounded-xl bg-background/40 border border-white/5">
+                        <Switch
+                          checked={!!settings.forceSubscribeEnabled}
+                          onCheckedChange={(checked: boolean) =>
+                            setSettings((s) => (s ? { ...s, forceSubscribeEnabled: checked === true } : s))
+                          }
+                        />
+                        <Label className="text-sm">{t("admin.settings.bot_check_subscribe")}</Label>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">ID канала или @username</Label>
+                        <Input
+                          value={settings.forceSubscribeChannelId ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, forceSubscribeChannelId: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.bot_channel_placeholder")}
+                          disabled={!settings.forceSubscribeEnabled}
+                        />
+                        <p className="text-[11px] text-muted-foreground">{t("admin.settings.bot_channel_hint")}</p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Сообщение для не подписанных</Label>
+                        <Input
+                          value={settings.forceSubscribeMessage ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, forceSubscribeMessage: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.bot_unsub_placeholder")}
+                          disabled={!settings.forceSubscribeEnabled}
+                        />
+                        <p className="text-[11px] text-muted-foreground">{t("admin.settings.bot_unsub_hint")}</p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-red-500/20 bg-gradient-to-br from-red-500/5 via-rose-500/5 to-pink-500/5 p-5 space-y-4">
+                      <div className="flex items-start gap-3">
+                        <div className="h-8 w-8 rounded-xl bg-red-500/20 flex items-center justify-center shrink-0"><Shield className="h-4 w-4 text-red-500" /></div>
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-base font-semibold mb-1">Community Blacklist</h3>
+                          <p className="text-xs text-muted-foreground">{t("admin.settings.bot_blacklist_hint")}</p>
+                        </div>
+                        <Switch
+                          checked={!!settings.blacklistEnabled}
+                          onCheckedChange={(checked: boolean) =>
+                            setSettings((s) => (s ? { ...s, blacklistEnabled: checked === true } : s))
+                          }
+                        />
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  {/* === ВКЛАДКА: ССЫЛКИ === */}
+                  <TabsContent value="links" className="space-y-5 mt-5">
+                    <div className="rounded-2xl border border-rose-500/20 bg-gradient-to-br from-rose-500/5 via-pink-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-rose-500/20 flex items-center justify-center"><Link2 className="h-4 w-4 text-rose-500" /></div>
+                        <h3 className="text-base font-semibold">Ссылки и поддержка</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.bot_support_hint")}</p>
+                      <div className="grid gap-3">
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <MessageCircle className="h-4 w-4 text-rose-500" />
+                            <Label className="text-sm font-medium">Техническая поддержка</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Username аккаунта поддержки или t.me-ссылка. Появляется в кнопке «Поддержка» в главном меню.</p>
+                          <Input
+                            value={settings.supportLink ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, supportLink: e.target.value || undefined } : s))}
+                            placeholder={t("admin.settings.bot_support_placeholder")}
+                          />
+                        </div>
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-pink-500" />
+                            <Label className="text-sm font-medium">Пользовательское соглашение</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Telegra.ph или внешняя страница с правилами использования сервиса.</p>
+                          <Input
+                            value={settings.agreementLink ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, agreementLink: e.target.value || undefined } : s))}
+                            placeholder="https://telegra.ph/..."
+                          />
+                        </div>
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-fuchsia-500" />
+                            <Label className="text-sm font-medium">Публичная оферта</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Юридическая оферта (особенно нужна при работе через ИП/самозанятость).</p>
+                          <Input
+                            value={settings.offerLink ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, offerLink: e.target.value || undefined } : s))}
+                            placeholder="https://telegra.ph/..."
+                          />
+                        </div>
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-purple-500" />
+                            <Label className="text-sm font-medium">Инструкции по подключению</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Инструкции для клиентов как подключить VPN на разных устройствах.</p>
+                          <Input
+                            value={settings.instructionsLink ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, instructionsLink: e.target.value || undefined } : s))}
+                            placeholder="https://telegra.ph/..."
+                          />
+                        </div>
+                        {/* инструкция по рефералке — кнопка «📖 Инструкции» в разделе рефералки бота. */}
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-emerald-500" />
+                            <Label className="text-sm font-medium">Инструкция по реферальной программе</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Telegra.ph-статья «Как пользоваться рефералкой». Кнопка «📖 Инструкции» под «Поделиться ссылкой» в разделе рефералки бота. Пусто = дефолтная ссылка.</p>
+                          <Input
+                            value={settings.referralInstructionsUrl ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, referralInstructionsUrl: e.target.value || undefined } : s))}
+                            placeholder="https://telegra.ph/Kak-polzovatsya-referalnoj-programmoj-i-zarabatyvat-05-28"
+                          />
+                        </div>
+                        {/* T11 (11.05.2026): Политика возврата (Telegraph URL). Кнопка появляется в боте «Помощь → Документы». */}
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-amber-500" />
+                            <Label className="text-sm font-medium">Политика возврата</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Telegra.ph-страница с правилами возврата средств. Появляется кнопкой в «Помощь → Документы».</p>
+                          <Input
+                            value={(settings as { refundLink?: string | null }).refundLink ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, refundLink: e.target.value || undefined } as typeof s : s))}
+                            placeholder="https://telegra.ph/..."
+                          />
+                        </div>
+                        {/* Текст экрана «⭕ Помощь» (help_intro_text) — большой rich-text «цели/приоритеты». */}
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40 sm:col-span-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <FileText className="h-4 w-4 text-cyan-500" />
+                            <Label className="text-sm font-medium">Текст экрана «Помощь»</Label>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">Большой блок «цели / приоритеты / правила» в разделе «⭕ Помощь» бота. Поддерживает несколько строк и эмодзи. Пусто = скрыт.</p>
+                          <textarea
+                            className="w-full min-h-[200px] rounded-xl border border-input bg-background px-3 py-2 text-sm"
+                            value={(settings as { helpIntroText?: string | null }).helpIntroText ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, helpIntroText: e.target.value || undefined } as typeof s : s))}
+                            placeholder="Обращайтесь к нам по любым вопросам и предложениям ✨&#10;&#10;🎯 Наша цель — ..."
+                            maxLength={8000}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* настройки экрана «🛡 Бесплатный Прокси для Telegram».
+                        Текст экрана + динамический список прокси-серверов (любое кол-во стран).
+                        Каждая запись = {flag, name, url}. Бот рендерит по кнопке на каждый
+                        элемент в порядке списка. Старые поля primary/backup используются
+                        только как fallback если массив пуст. */}
+                    <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-500/5 via-cyan-500/5 to-blue-500/5 p-5 space-y-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-xl bg-sky-500/20 flex items-center justify-center">
+                          <Link2 className="h-4 w-4 text-sky-500" />
+                        </div>
+                        <h3 className="text-base font-semibold">🛡 Бесплатный Telegram-прокси</h3>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Кнопка «🛡 Бесплатный Прокси для Telegram» в главном меню бота. Открывает экран с инструкцией и кнопками-странами. Добавь столько прокси-серверов, сколько нужно — каждый рендерится отдельной кнопкой в порядке списка.
+                      </p>
+                      <div className="grid gap-3">
+                        <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <Label className="text-sm font-medium">Текст экрана</Label>
+                          <p className="text-[11px] text-muted-foreground mb-2">Markdown-текст инструкции (что такое прокси, как подключить/отключить). Показывается над кнопками.</p>
+                          <textarea
+                            className="w-full min-h-[160px] rounded-xl border border-input bg-background px-3 py-2 text-sm font-mono"
+                            value={settings.tgProxyText ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, tgProxyText: e.target.value || undefined } : s))}
+                            placeholder="🛡 Бесплатный прокси для Telegram&#10;&#10;Что такое прокси?..."
+                            maxLength={8000}
+                          />
+                        </div>
+
+                        {/* Список серверов */}
+                        <div className="space-y-2 p-4 rounded-xl border border-white/10 bg-card/40">
+                          <div className="flex items-center justify-between mb-1">
+                            <Label className="text-sm font-medium">Прокси-серверы</Label>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setSettings((s) => {
+                                if (!s) return s;
+                                const list = ((s as { tgProxyServers?: { flag: string; name: string; url: string }[] | null }).tgProxyServers) ?? [];
+                                return { ...s, tgProxyServers: [...list, { flag: "", name: "", url: "" }] } as typeof s;
+                              })}
+                            >
+                              + Добавить страну
+                            </Button>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mb-2">URL формата <code className="text-[10px] bg-foreground/5 px-1 py-0.5 rounded">tg://proxy?server=IP&amp;port=4433&amp;secret=ee...</code>. Порядок в списке = порядок кнопок в боте. Стрелочки ↑↓ — поменять местами, ✕ — удалить.</p>
+                          {(() => {
+                            const list = ((settings as { tgProxyServers?: { flag: string; name: string; url: string }[] | null }).tgProxyServers) ?? [];
+                            if (list.length === 0) {
+                              return <p className="text-[11px] text-muted-foreground italic p-3 text-center bg-foreground/[0.02] rounded-lg">Список пуст. Добавь хотя бы один прокси-сервер.</p>;
+                            }
+                            return (
+                              <div className="space-y-2">
+                                {list.map((srv, idx) => (
+                                  <div key={idx} className="flex items-start gap-2 p-2 rounded-lg border border-white/10 bg-background/30">
+                                    <div className="flex flex-col gap-1 pt-1">
+                                      <button
+                                        type="button"
+                                        disabled={idx === 0}
+                                        title="Вверх"
+                                        className="text-xs disabled:opacity-30 hover:text-primary"
+                                        onClick={() => setSettings((s) => {
+                                          if (!s) return s;
+                                          const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                          if (idx <= 0) return s;
+                                          [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+                                          return { ...s, tgProxyServers: arr } as typeof s;
+                                        })}
+                                      >▲</button>
+                                      <button
+                                        type="button"
+                                        disabled={idx === list.length - 1}
+                                        title="Вниз"
+                                        className="text-xs disabled:opacity-30 hover:text-primary"
+                                        onClick={() => setSettings((s) => {
+                                          if (!s) return s;
+                                          const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                          if (idx >= arr.length - 1) return s;
+                                          [arr[idx], arr[idx + 1]] = [arr[idx + 1], arr[idx]];
+                                          return { ...s, tgProxyServers: arr } as typeof s;
+                                        })}
+                                      >▼</button>
+                                    </div>
+                                    <Input
+                                      className="w-16 text-center"
+                                      value={srv.flag}
+                                      onChange={(e) => setSettings((s) => {
+                                        if (!s) return s;
+                                        const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                        arr[idx] = { ...arr[idx], flag: e.target.value };
+                                        return { ...s, tgProxyServers: arr } as typeof s;
+                                      })}
+                                      placeholder="🇳🇱"
+                                      maxLength={8}
+                                    />
+                                    <Input
+                                      className="w-40"
+                                      value={srv.name}
+                                      onChange={(e) => setSettings((s) => {
+                                        if (!s) return s;
+                                        const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                        arr[idx] = { ...arr[idx], name: e.target.value };
+                                        return { ...s, tgProxyServers: arr } as typeof s;
+                                      })}
+                                      placeholder="Название (Нидерланды)"
+                                      maxLength={50}
+                                    />
+                                    <Input
+                                      className="flex-1 font-mono text-[11px]"
+                                      value={srv.url}
+                                      onChange={(e) => setSettings((s) => {
+                                        if (!s) return s;
+                                        const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                        arr[idx] = { ...arr[idx], url: e.target.value };
+                                        return { ...s, tgProxyServers: arr } as typeof s;
+                                      })}
+                                      placeholder="tg://proxy?server=...&port=4433&secret=ee..."
+                                      maxLength={2000}
+                                    />
+                                    <Button
+                                      type="button"
+                                      size="icon"
+                                      variant="ghost"
+                                      title="Удалить"
+                                      className="text-destructive hover:bg-destructive/10"
+                                      onClick={() => setSettings((s) => {
+                                        if (!s) return s;
+                                        const arr = [...((s as { tgProxyServers?: typeof list }).tgProxyServers ?? [])];
+                                        arr.splice(idx, 1);
+                                        return { ...s, tgProxyServers: arr } as typeof s;
+                                      })}
+                                    >✕</Button>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+
                 {message && <p className="text-sm text-muted-foreground">{message}</p>}
-                <Button type="submit" disabled={saving}>
-                  {saving ? "Сохранение…" : "Сохранить"}
+                <Button type="submit" disabled={saving} className="w-full sm:w-auto h-11 px-6 rounded-xl bg-gradient-to-r from-sky-500 via-indigo-500 to-fuchsia-500 hover:opacity-90 text-white font-semibold shadow-lg shadow-primary/20">
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                 </Button>
               </CardContent>
             </Card>
           </TabsContent>
 
-          <TabsContent value="trial">
-            <Card>
-              <CardHeader>
-                <CardTitle>Триал</CardTitle>
-                <p className="text-sm text-muted-foreground">Параметры пробного периода для новых пользователей</p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Дней триала</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settings.trialDays}
-                    onChange={(e) =>
-                      setSettings((s) => (s ? { ...s, trialDays: parseInt(e.target.value, 10) || 0 } : s))
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Сквад для триала (Remna)</Label>
-                  <select
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
-                    value={settings.trialSquadUuid ?? ""}
-                    onChange={(e) => setSettings((s) => s ? { ...s, trialSquadUuid: e.target.value || null } : s)}
-                  >
-                    <option value="">— не выбран</option>
-                    {squads.map((s) => (
-                      <option key={s.uuid} value={s.uuid}>{s.name || s.uuid}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Лимит устройств триала (HWID)</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settings.trialDeviceLimit ?? ""}
-                    onChange={(e) =>
-                      setSettings((s) => (s ? { ...s, trialDeviceLimit: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 } : s))
-                    }
-                    placeholder="— без лимита"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Лимит трафика триала (ГБ)</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={settings.trialTrafficLimitBytes != null ? (settings.trialTrafficLimitBytes / (1024 ** 3)).toFixed(1) : ""}
-                    onChange={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === "") {
-                        setSettings((s) => (s ? { ...s, trialTrafficLimitBytes: null } : s));
-                        return;
-                      }
-                      const n = parseFloat(v);
-                      if (Number.isNaN(n)) return;
-                      setSettings((s) => (s ? { ...s, trialTrafficLimitBytes: Math.round(n * 1024 ** 3) } : s));
-                    }}
-                    placeholder="— без лимита"
-                  />
-                  <p className="text-xs text-muted-foreground">1 ГБ = 1024³ байт (ГиБ). Как в тарифах — так и в Remna передаётся лимит в байтах.</p>
-                </div>
-                {message && <p className="text-sm text-muted-foreground">{message}</p>}
-                <Button type="submit" disabled={saving}>
-                  {saving ? "Сохранение…" : "Сохранить"}
-                </Button>
-              </CardContent>
-            </Card>
-          </TabsContent>
+          {/* TabsContent value="trial" удалён.
+              Старый single-trial flow заменён на multi-trials (T15) — управление в /admin/trials.
+              Поля settings.trialDays / trialSquadUuid / trialDeviceLimit / trialTrafficLimitBytes
+              остаются в БД как back-compat (если ни одного активного триала в Trial[] нет —
+              backend fallback'ит на legacy single-trial). Но из UI настроек убраны. */}
 
           <TabsContent value="subpage">
-            <Card>
-              <CardHeader>
-                <CardTitle>Страница подписки (приложения по платформам)</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Визуальный редактор: включите или отключите приложения для iOS, Android, macOS, Windows, Linux и измените порядок перетаскиванием. За основу берётся базовый конфиг (subpage-00000000-0000-0000-0000-000000000000.json).
-                </p>
-              </CardHeader>
-              <CardContent>
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-rose-500/10 via-pink-500/10 to-fuchsia-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-rose-500/5 via-transparent to-fuchsia-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-rose-500/30 via-pink-500/20 to-fuchsia-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <FileJson className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-rose-500 via-pink-500 to-fuchsia-500">
+                      {t("admin.settings.subpage_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.subpage_editor_hint")}</p>
+                  </div>
+                </div>
+              </div>
+              <CardContent className="p-4 sm:p-6">
+                <div className="p-4 rounded-lg border bg-muted/40 mb-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="useRemnaSubscriptionPage"
+                      checked={settings.useRemnaSubscriptionPage ?? false}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, useRemnaSubscriptionPage: e.target.checked } : s))}
+                      className="rounded border"
+                    />
+                    <Label htmlFor="useRemnaSubscriptionPage" className="cursor-pointer">
+                      {t("admin.settings.use_remna_subpage")}
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("admin.settings.subpage_remna_hint")}
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      disabled={saving}
+                      onClick={async () => {
+                        setSaving(true);
+                        setMessage("");
+                        try {
+                          await api.updateSettings(token, { useRemnaSubscriptionPage: settings.useRemnaSubscriptionPage ?? false });
+                          setMessage(t("admin.settings.saved"));
+                        } catch {
+                          setMessage(t("admin.settings.save_error"));
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                    >
+                      {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                    </Button>
+                    {message && <span className="text-sm text-muted-foreground">{message}</span>}
+                  </div>
+                </div>
                 <SubscriptionPageEditor
                   currentConfigJson={settings?.subscriptionPageConfig ?? null}
                   defaultConfig={defaultSubpageConfig}
                   onFetchDefault={async () => {
-                    const c = await api.getDefaultSubscriptionPageConfig(token);
+                    // fresh=true чтобы перечитать файл с диска (а не отдать кэш)
+                    const c = await api.getDefaultSubscriptionPageConfig(token, true);
                     setDefaultSubpageConfig(c ?? null);
                     return c ?? null;
                   }}
@@ -1379,9 +2472,9 @@ export function SettingsPage() {
                     setMessage("");
                     try {
                       await api.updateSettings(token, { subscriptionPageConfig: configJson });
-                      setMessage("Сохранено");
+                      setMessage(t("admin.settings.saved"));
                     } catch {
-                      setMessage("Ошибка сохранения");
+                      setMessage(t("admin.settings.save_error"));
                     } finally {
                       setSaving(false);
                     }
@@ -1393,59 +2486,301 @@ export function SettingsPage() {
           </TabsContent>
 
           <TabsContent value="referral">
-            <Card>
-              <CardHeader>
-                <CardTitle>Рефералы</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Проценты от пополнений по уровням: 1 — приглашённые вами; 2 — приглашённые вашими рефералами; 3 — приглашённые рефералами 2 уровня.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label>1 уровень (%) — от пополнений приглашённых вами</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={settings.defaultReferralPercent ?? 30}
-                    onChange={(e) =>
-                      setSettings((s) => (s ? { ...s, defaultReferralPercent: Number(e.target.value) || 0 } : s))
-                    }
-                  />
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-violet-500/10 via-purple-500/10 to-fuchsia-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 via-transparent to-fuchsia-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-violet-500/30 via-purple-500/20 to-fuchsia-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <Users className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-violet-500 via-purple-500 to-fuchsia-500">
+                      {t("admin.settings.referral_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.referral_subtitle")}</p>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>2 уровень (%) — от пополнений рефералов 1 уровня</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={settings.referralPercentLevel2 ?? 10}
-                    onChange={(e) =>
-                      setSettings((s) => (s ? { ...s, referralPercentLevel2: Number(e.target.value) || 0 } : s))
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>3 уровень (%) — от пополнений рефералов 2 уровня</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={settings.referralPercentLevel3 ?? 10}
-                    onChange={(e) =>
-                      setSettings((s) => (s ? { ...s, referralPercentLevel3: Number(e.target.value) || 0 } : s))
-                    }
-                  />
+              </div>
+              <CardContent className="space-y-5 p-4 sm:p-6">
+                <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-violet-500/20 flex items-center justify-center"><Network className="h-4 w-4 text-violet-500" /></div>
+                    <h3 className="text-base font-semibold">3-уровневая реферальная сеть</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Процент с каждого пополнения, который начисляется на баланс реферера. Уровень 1 — прямой реф; уровень 2 — реф вашего рефа; уровень 3 — реф второго уровня.</p>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-xl border border-violet-500/30 bg-card/40 p-4 space-y-2 relative overflow-hidden">
+                      <div className="absolute -top-4 -right-4 w-16 h-16 rounded-full bg-gradient-to-br from-violet-500/20 to-violet-500/5 blur-xl" />
+                      <div className="relative flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-violet-500/15 text-violet-500 text-xs font-bold">L1</span>
+                        <Label className="text-sm font-medium">{t("admin.settings.referral_level_1")}</Label>
+                      </div>
+                      <div className="relative flex items-baseline gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          className="text-2xl font-bold tabular-nums h-14"
+                          value={settings.defaultReferralPercent ?? 30}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, defaultReferralPercent: Number(e.target.value) || 0 } : s))}
+                        />
+                        <span className="text-2xl font-bold text-violet-500">%</span>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-purple-500/30 bg-card/40 p-4 space-y-2 relative overflow-hidden">
+                      <div className="absolute -top-4 -right-4 w-16 h-16 rounded-full bg-gradient-to-br from-purple-500/20 to-purple-500/5 blur-xl" />
+                      <div className="relative flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-purple-500/15 text-purple-500 text-xs font-bold">L2</span>
+                        <Label className="text-sm font-medium">{t("admin.settings.referral_level_2")}</Label>
+                      </div>
+                      <div className="relative flex items-baseline gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          className="text-2xl font-bold tabular-nums h-14"
+                          value={settings.referralPercentLevel2 ?? 10}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, referralPercentLevel2: Number(e.target.value) || 0 } : s))}
+                        />
+                        <span className="text-2xl font-bold text-purple-500">%</span>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-fuchsia-500/30 bg-card/40 p-4 space-y-2 relative overflow-hidden">
+                      <div className="absolute -top-4 -right-4 w-16 h-16 rounded-full bg-gradient-to-br from-fuchsia-500/20 to-fuchsia-500/5 blur-xl" />
+                      <div className="relative flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-fuchsia-500/15 text-fuchsia-500 text-xs font-bold">L3</span>
+                        <Label className="text-sm font-medium">{t("admin.settings.referral_level_3")}</Label>
+                      </div>
+                      <div className="relative flex items-baseline gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          className="text-2xl font-bold tabular-nums h-14"
+                          value={settings.referralPercentLevel3 ?? 10}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, referralPercentLevel3: Number(e.target.value) || 0 } : s))}
+                        />
+                        <span className="text-2xl font-bold text-fuchsia-500">%</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 {message && <p className="text-sm text-muted-foreground">{message}</p>}
-                <Button type="submit" disabled={saving}>
-                  {saving ? "Сохранение…" : "Сохранить"}
+                <Button type="submit" disabled={saving} className="w-full sm:w-auto h-11 px-6 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:opacity-90 text-white font-semibold shadow-lg shadow-violet-500/20">
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                 </Button>
               </CardContent>
             </Card>
           </TabsContent>
 
-          <TabsContent value="payments">
+          <TabsContent value="payments" className="space-y-4">
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-amber-500/10 via-orange-500/10 to-yellow-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-amber-500/5 via-transparent to-yellow-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-amber-500/30 via-orange-500/20 to-yellow-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <CreditCard className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500">
+                      {t("admin.settings.payments_general")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">Платёжные провайдеры, авто-продление подписки, общие настройки оплат.</p>
+                  </div>
+                </div>
+              </div>
+              <CardContent className="space-y-4 p-4 sm:p-6">
+                <div className="flex items-center justify-between gap-4 p-4 rounded-xl border bg-card/50">
+                  <div className="space-y-1">
+                    <Label className="text-base font-semibold">{t("admin.settings.auto_renew")}</Label>
+                    <p className="text-sm text-muted-foreground">{t("admin.settings.auto_renew_hint")}</p>
+                  </div>
+                  <Switch
+                    checked={settings.defaultAutoRenewEnabled ?? false}
+                    onCheckedChange={(checked) => setSettings(s => s ? { ...s, defaultAutoRenewEnabled: checked } : s)}
+                  />
+                </div>
+
+                <div className={`flex items-center justify-between gap-4 p-4 rounded-xl border bg-card/50${!settings.yookassaShopId || !settings.yookassaSecretKey || settings.yookassaSecretKey === "********" && !settings.yookassaShopId ? " opacity-50" : ""}`}>
+                  <div className="space-y-1">
+                    <Label className="text-base font-semibold">{t("admin.settings.yookassa_recurring")}</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {!settings.yookassaShopId || !settings.yookassaSecretKey
+                        ? t("admin.settings.yookassa_recurring_disabled")
+                        : t("admin.settings.yookassa_recurring_hint")
+                      }
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.yookassaRecurringEnabled ?? false}
+                    disabled={!settings.yookassaShopId || !settings.yookassaSecretKey}
+                    onCheckedChange={(checked) => setSettings(s => s ? { ...s, yookassaRecurringEnabled: checked } : s)}
+                  />
+                </div>
+
+                {/* Настройки автопродления */}
+                <div className="space-y-4 p-4 rounded-xl border bg-card/50">
+                  <Label className="text-base font-semibold">{t("admin.settings.auto_renew_settings")}</Label>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.renew_days_before")}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={settings.autoRenewDaysBeforeExpiry ?? 1}
+                        onChange={(e) => setSettings(s => s ? { ...s, autoRenewDaysBeforeExpiry: parseInt(e.target.value) || 1 } : s)}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.renew_days_hint")}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.notify_days_before")}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={settings.autoRenewNotifyDaysBefore ?? 3}
+                        onChange={(e) => setSettings(s => s ? { ...s, autoRenewNotifyDaysBefore: parseInt(e.target.value) || 3 } : s)}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.notify_days_hint")}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.grace_period")}</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={14}
+                        value={settings.autoRenewGracePeriodDays ?? 2}
+                        onChange={(e) => setSettings(s => s ? { ...s, autoRenewGracePeriodDays: parseInt(e.target.value) || 2 } : s)}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.grace_period_hint")}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.max_retries")}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={settings.autoRenewMaxRetries ?? 3}
+                        onChange={(e) => setSettings(s => s ? { ...s, autoRenewMaxRetries: parseInt(e.target.value) || 3 } : s)}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.max_retries_hint")}</p>
+                    </div>
+                  </div>
+                </div>
+                {message && <p className="text-sm text-muted-foreground">{message}</p>}
+                <Button onClick={handleSubmit} disabled={saving}>
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Auto-renewal statistics card */}
+            {autoRenewStats && (
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <BarChart3 className="h-5 w-5 text-primary" />
+                    <CardTitle>{t("admin.settings.auto_renew_stats")}</CardTitle>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold text-green-500">{autoRenewStats.enabled}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.auto_renew_on")}</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold text-muted-foreground">{autoRenewStats.disabled}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.auto_renew_off")}</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold text-yellow-500">{autoRenewStats.retriesInProgress}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        <RotateCw className="inline h-3 w-3 mr-1" />
+                        {t("admin.settings.retry_attempts")}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold">{autoRenewStats.renewalsLast7Days}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.renewals_7d")}</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold">{autoRenewStats.renewalsLast30Days}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.renewals_30d")}</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-4 text-center">
+                      <p className="text-2xl font-bold text-primary">{autoRenewStats.amountLast30Days.toLocaleString("ru-RU")} {settings?.defaultCurrency === "rub" ? "₽" : "$"}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.amount_30d")}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* ── Порядок и названия платёжных провайдеров ── */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-2">
+                  <GripVertical className="h-5 w-5 text-primary" />
+                  <CardTitle>{t("admin.settings.payment_providers_order")}</CardTitle>
+                </div>
+                <p className="text-sm text-muted-foreground">{t("admin.settings.payment_providers_order_hint")}</p>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {(settings.paymentProviders ?? []).map((prov, idx, arr) => (
+                  <div key={prov.id} className="flex items-center gap-3 p-3 rounded-xl border bg-card/50">
+                    <GripVertical className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <Input
+                      value={prov.label}
+                      onChange={(e) => {
+                        const updated = [...arr];
+                        updated[idx] = { ...prov, label: e.target.value };
+                        setSettings((s) => s ? { ...s, paymentProviders: updated } : s);
+                      }}
+                      className="flex-1 h-9"
+                    />
+                    <span className="text-xs text-muted-foreground font-mono shrink-0">{prov.id}</span>
+                    <div className="flex flex-col gap-0.5">
+                      <button
+                        type="button"
+                        disabled={idx === 0}
+                        className="p-1 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        onClick={() => {
+                          if (idx === 0) return;
+                          const updated = [...arr];
+                          [updated[idx - 1], updated[idx]] = [updated[idx], updated[idx - 1]];
+                          updated.forEach((p, i) => { p.sortOrder = i; });
+                          setSettings((s) => s ? { ...s, paymentProviders: updated } : s);
+                        }}
+                      >
+                        <ChevronUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={idx === arr.length - 1}
+                        className="p-1 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        onClick={() => {
+                          if (idx === arr.length - 1) return;
+                          const updated = [...arr];
+                          [updated[idx], updated[idx + 1]] = [updated[idx + 1], updated[idx]];
+                          updated.forEach((p, i) => { p.sortOrder = i; });
+                          setSettings((s) => s ? { ...s, paymentProviders: updated } : s);
+                        }}
+                      >
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {message && <p className="text-sm text-muted-foreground">{message}</p>}
+                <Button onClick={handleSubmit} disabled={saving}>
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
+              </CardContent>
+            </Card>
+
             <Card>
               <Collapsible defaultOpen={false} className="group">
                 <CollapsibleTrigger asChild>
@@ -1458,12 +2793,12 @@ export function SettingsPage() {
                         <div className="flex items-center gap-2">
                           <CreditCard className="h-5 w-5 text-primary" />
                           <CardTitle>Platega</CardTitle>
-                          <span className="text-xs font-normal text-muted-foreground">— нажмите, чтобы развернуть настройки</span>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.platega_expand")}</span>
                         </div>
                         <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
                       </div>
                       <p className="text-sm text-muted-foreground mt-1">
-                        Callback URL настраивается ниже (с доменом из настроек)
+                        {t("admin.settings.platega_callback_note")}
                       </p>
                     </CardHeader>
                   </button>
@@ -1471,11 +2806,11 @@ export function SettingsPage() {
                 <CollapsibleContent>
                   <CardContent className="space-y-4 border-t pt-4">
                     <div className="space-y-2">
-                      <Label>Callback URL для Platega</Label>
+                      <Label>{t("admin.settings.platega_callback")}</Label>
                       <div className="flex gap-2">
                         <Input
                           readOnly
-                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/platega` : "Укажите «URL приложения» во вкладке «Общие»"}
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/platega` : t("admin.settings.specify_url_hint")}
                           className="font-mono text-sm bg-muted/50"
                         />
                         <Button
@@ -1492,16 +2827,16 @@ export function SettingsPage() {
                             }
                           }}
                           disabled={!(settings.publicAppUrl ?? "").trim()}
-                          title="Копировать"
+                          title={t("admin.settings.copy")}
                         >
                           {plategaCallbackCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                         </Button>
                       </div>
-                      <p className="text-xs text-muted-foreground">Используется «URL приложения» из вкладки «Общие». Укажите его там и вставьте этот callback в ЛК Platega.</p>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.platega_callback_hint")}</p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label>Merchant ID (X-MerchantId)</Label>
+                        <Label>{t("admin.settings.platega_merchant")}</Label>
                         <Input
                           value={settings.plategaMerchantId ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, plategaMerchantId: e.target.value || null } : s))}
@@ -1509,18 +2844,38 @@ export function SettingsPage() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label>Секрет (X-Secret)</Label>
+                        <Label>{t("admin.settings.platega_secret")}</Label>
                         <Input
                           type="password"
                           value={settings.plategaSecret ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, plategaSecret: e.target.value || null } : s))}
-                          placeholder="API ключ из ЛК Platega"
+                          placeholder={t("admin.settings.platega_key_placeholder")}
                         />
                       </div>
                     </div>
+                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 mt-4 space-y-2">
+                      <Label className="text-emerald-700 dark:text-emerald-400">🔒 Защита webhook'ов от форджинга</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Включается автоматически когда заданы <code className="text-[11px]">Merchant ID</code> и <code className="text-[11px]">Secret key</code> выше. Каждый входящий webhook проверяется через Platega API: запрашиваем у них реальный статус транзакции и доверяем только их ответу. Атакер не может подделать ответ от <code className="text-[11px]">app.platega.io</code>, поэтому форджинг невозможен.
+                      </p>
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Опционально: HMAC подпись (на будущее)</summary>
+                        <div className="mt-2 space-y-1.5">
+                          <p className="text-muted-foreground">
+                            Если когда-нибудь Platega добавит подписание webhook'ов в кабинете — впишешь сюда секрет и все webhook'и без валидной HMAC-SHA256 в <code className="text-[11px]">X-Signature</code> будут отвергаться. <strong>Сейчас в их кабинете такой опции нет — оставь поле пустым.</strong>
+                          </p>
+                          <Input
+                            type="password"
+                            value={(settings as { plategaWebhookSecret?: string | null }).plategaWebhookSecret ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, plategaWebhookSecret: e.target.value || null } as typeof s : s))}
+                            placeholder="(оставь пустым — Platega не поддерживает HMAC)"
+                          />
+                        </div>
+                      </details>
+                    </div>
                     <div className="space-y-2">
-                      <Label>Методы оплаты</Label>
-                      <p className="text-xs text-muted-foreground">Включите нужные и задайте подпись на кнопке для клиентов</p>
+                      <Label>{t("admin.settings.payment_methods")}</Label>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.payment_methods_hint")}</p>
                       <div className="rounded-md border divide-y">
                         {(settings.plategaMethods ?? DEFAULT_PLATEGA_METHODS).map((m) => (
                           <div key={m.id} className="flex items-center gap-4 p-3">
@@ -1558,7 +2913,7 @@ export function SettingsPage() {
                                     : s
                                 )
                               }
-                              placeholder="Подпись на кнопке"
+                              placeholder={t("admin.settings.platega_btn_placeholder")}
                             />
                           </div>
                         ))}
@@ -1566,7 +2921,7 @@ export function SettingsPage() {
                     </div>
                     {message && <p className="text-sm text-muted-foreground">{message}</p>}
                     <Button type="submit" disabled={saving}>
-                      {saving ? "Сохранение…" : "Сохранить"}
+                      {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                     </Button>
                   </CardContent>
                 </CollapsibleContent>
@@ -1583,12 +2938,12 @@ export function SettingsPage() {
                         <div className="flex items-center gap-2">
                           <Wallet className="h-5 w-5 text-primary" />
                           <CardTitle>ЮMoney</CardTitle>
-                          <span className="text-xs font-normal text-muted-foreground">— оплата картой</span>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.yoomoney_card")}</span>
                         </div>
                         <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
                       </div>
                       <p className="text-sm text-muted-foreground mt-1">
-                        Регистрация: <a href="https://yoomoney.ru/myservices/new" target="_blank" rel="noreferrer" className="text-primary underline">yoomoney.ru/myservices/new</a>. URL вебхука копируется кнопкой ниже.
+                        {t("admin.settings.yoomoney_register")} <a href="https://yoomoney.ru/myservices/new" target="_blank" rel="noreferrer" className="text-primary underline">yoomoney.ru/myservices/new</a>
                       </p>
                     </CardHeader>
                   </button>
@@ -1596,11 +2951,11 @@ export function SettingsPage() {
                 <CollapsibleContent>
                   <CardContent className="space-y-4 border-t pt-4">
                     <div className="space-y-2">
-                      <Label>URL вебхука для ЮMoney</Label>
+                      <Label>{t("admin.settings.yoomoney_webhook")}</Label>
                       <div className="flex gap-2">
                         <Input
                           readOnly
-                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/yoomoney` : "Укажите «URL приложения» во вкладке «Общие»"}
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/yoomoney` : t("admin.settings.specify_url_hint")}
                           className="font-mono text-sm bg-muted/50"
                         />
                         <Button
@@ -1617,40 +2972,40 @@ export function SettingsPage() {
                             }
                           }}
                           disabled={!(settings.publicAppUrl ?? "").trim()}
-                          title="Копировать"
+                          title={t("admin.settings.copy")}
                         >
                           {yoomoneyWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                         </Button>
                       </div>
-                      <p className="text-xs text-muted-foreground">Укажите этот URL в <a href="https://yoomoney.ru/transfer/myservices/http-notification" target="_blank" rel="noreferrer" className="text-primary underline">настройках HTTP-уведомлений</a> кошелька ЮMoney.</p>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.yoomoney_webhook_hint")}</p>
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      Пополнение баланса только через оплату картой (форма ЮMoney). Укажите кошелёк для приёма и секрет вебхука.
+                      {t("admin.settings.yoomoney_desc")}
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-2 sm:col-span-2">
-                        <Label>Номер кошелька для приёма</Label>
+                        <Label>{t("admin.settings.yoomoney_wallet")}</Label>
                         <Input
                           value={settings.yoomoneyReceiverWallet ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, yoomoneyReceiverWallet: e.target.value || null } : s))}
                           placeholder="41001123456789"
                         />
-                        <p className="text-xs text-muted-foreground">Средства зачисляются на этот кошелёк при пополнении через ЮMoney.</p>
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.yoomoney_wallet_hint")}</p>
                       </div>
                       <div className="space-y-2 sm:col-span-2">
-                        <Label>Секрет для вебхука (HTTP-уведомления)</Label>
+                        <Label>{t("admin.settings.yoomoney_secret")}</Label>
                         <Input
                           type="password"
                           value={settings.yoomoneyNotificationSecret ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, yoomoneyNotificationSecret: e.target.value || null } : s))}
-                          placeholder="Из настроек кошелька ЮMoney → Уведомления"
+                          placeholder={t("admin.settings.yoomoney_secret_placeholder")}
                         />
-                        <p className="text-xs text-muted-foreground">Задаётся в <a href="https://yoomoney.ru/transfer/myservices/http-notification" target="_blank" rel="noreferrer" className="text-primary underline">настройках HTTP-уведомлений</a> кошелька.</p>
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.yoomoney_secret_hint")}</p>
                       </div>
                     </div>
                     <div className="pt-2 border-t">
                       <Button type="submit" disabled={saving} className="min-w-[140px]">
-                        {saving ? "Сохранение…" : "Сохранить"}
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                       </Button>
                     </div>
                   </CardContent>
@@ -1668,12 +3023,12 @@ export function SettingsPage() {
                         <div className="flex items-center gap-2">
                           <Wallet className="h-5 w-5 text-primary" />
                           <CardTitle>ЮKassa</CardTitle>
-                          <span className="text-xs font-normal text-muted-foreground">— API приём платежей</span>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.yookassa_api")}</span>
                         </div>
                         <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
                       </div>
                       <p className="text-sm text-muted-foreground mt-1">
-                        Регистрация: <a href="https://yookassa.ru/joinups" target="_blank" rel="noreferrer" className="text-primary underline">yookassa.ru</a>. URL вебхука копируется кнопкой ниже.
+                        {t("admin.settings.yookassa_register")} <a href="https://yookassa.ru/joinups" target="_blank" rel="noreferrer" className="text-primary underline">yookassa.ru</a>
                       </p>
                     </CardHeader>
                   </button>
@@ -1681,11 +3036,11 @@ export function SettingsPage() {
                 <CollapsibleContent>
                   <CardContent className="space-y-4 border-t pt-4">
                     <div className="space-y-2">
-                      <Label>URL вебхука для ЮKassa</Label>
+                      <Label>{t("admin.settings.yookassa_webhook")}</Label>
                       <div className="flex gap-2">
                         <Input
                           readOnly
-                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/yookassa` : "Укажите «URL приложения» во вкладке «Общие»"}
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/yookassa` : t("admin.settings.specify_url_hint")}
                           className="font-mono text-sm bg-muted/50"
                         />
                         <Button
@@ -1702,19 +3057,19 @@ export function SettingsPage() {
                             }
                           }}
                           disabled={!(settings.publicAppUrl ?? "").trim()}
-                          title="Копировать"
+                          title={t("admin.settings.copy")}
                         >
                           {yookassaWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                         </Button>
                       </div>
-                      <p className="text-xs text-muted-foreground">В ЛК ЮKassa включите уведомления и укажите этот URL (событие payment.succeeded).</p>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.yookassa_webhook_hint")}</p>
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      Приём платежей картой и СБП через API ЮKassa. Укажите ID магазина и секретный ключ из <a href="https://yookassa.ru/my/merchant/integration/api-keys" target="_blank" rel="noreferrer" className="text-primary underline">настроек API</a>.
+                      {t("admin.settings.yookassa_desc")}
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label>ID магазина (shopId)</Label>
+                        <Label>{t("admin.settings.yookassa_shop_id")}</Label>
                         <Input
                           value={settings.yookassaShopId ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, yookassaShopId: e.target.value || null } : s))}
@@ -1722,19 +3077,459 @@ export function SettingsPage() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label>Секретный ключ</Label>
+                        <Label>{t("admin.settings.yookassa_secret")}</Label>
                         <Input
                           type="password"
                           value={settings.yookassaSecretKey ?? ""}
                           onChange={(e) => setSettings((s) => (s ? { ...s, yookassaSecretKey: e.target.value || null } : s))}
                           placeholder="live_..."
                         />
-                        <p className="text-xs text-muted-foreground">Не показывайте ключ третьим лицам.</p>
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.yookassa_key_hint")}</p>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 mt-4 space-y-3">
+                      <div>
+                        <Label className="text-amber-700 dark:text-amber-400">Webhook Basic Auth</Label>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Защита от форджинга webhook'ов. В кабинете ЮKassa настроить webhook URL вида{" "}
+                          <code className="text-[11px]">https://USER:PASS@panel.example.com/api/webhooks/yookassa</code>{" "}
+                          и сюда вписать те же USER и PASS. Если не задано — webhook принимается без проверки (с warning'ом в логах).
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                          <Label className="text-xs">Basic-auth username</Label>
+                          <Input
+                            value={(settings as { yookassaWebhookBasicUser?: string | null }).yookassaWebhookBasicUser ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, yookassaWebhookBasicUser: e.target.value || null } as typeof s : s))}
+                            placeholder="webhook_user"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs">Basic-auth password</Label>
+                          <Input
+                            type="password"
+                            value={(settings as { yookassaWebhookBasicPassword?: string | null }).yookassaWebhookBasicPassword ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, yookassaWebhookBasicPassword: e.target.value || null } as typeof s : s))}
+                            placeholder="случайный длинный пароль"
+                          />
+                        </div>
                       </div>
                     </div>
                     <div className="pt-2 border-t">
                       <Button type="submit" disabled={saving} className="min-w-[140px]">
-                        {saving ? "Сохранение…" : "Сохранить"}
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </CollapsibleContent>
+              </Collapsible>
+
+              <Collapsible defaultOpen={false} className="group mt-4">
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="w-full cursor-pointer rounded-t-lg text-left transition-colors hover:bg-muted/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                  >
+                    <CardHeader className="pointer-events-none [&_.chevron]:transition-transform [&_.chevron]:duration-200 group-data-[state=open]:[&_.chevron]:rotate-180">
+                      <div className="flex items-center justify-between pr-2">
+                        <div className="flex items-center gap-2">
+                          <Wallet className="h-5 w-5 text-primary" />
+                          <CardTitle>Crypto Pay (Crypto Bot)</CardTitle>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.cryptopay_telegram")}</span>
+                        </div>
+                        <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t("admin.settings.cryptopay_register")}
+                      </p>
+                    </CardHeader>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <CardContent className="space-y-4 border-t pt-4">
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.cryptopay_webhook")}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          readOnly
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/cryptopay` : t("admin.settings.specify_url_hint")}
+                          className="font-mono text-sm bg-muted/50"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={async () => {
+                            const url = (settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/cryptopay` : "";
+                            if (url && navigator.clipboard) {
+                              await navigator.clipboard.writeText(url);
+                              setCryptopayWebhookCopied(true);
+                              setTimeout(() => setCryptopayWebhookCopied(false), 2000);
+                            }
+                          }}
+                          disabled={!(settings.publicAppUrl ?? "").trim()}
+                          title={t("admin.settings.copy")}
+                        >
+                          {cryptopayWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.cryptopay_webhook_hint")}</p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {t("admin.settings.cryptopay_desc")}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.cryptopay_token")}</Label>
+                        <Input
+                          type="password"
+                          value={settings.cryptopayApiToken ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, cryptopayApiToken: e.target.value || null } : s))}
+                          placeholder="123456789:AAzQc..."
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.cryptopay_token_hint")}</p>
+                      </div>
+                      <div className="space-y-2 flex flex-col justify-end">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="cryptopayTestnet"
+                            checked={settings.cryptopayTestnet ?? false}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, cryptopayTestnet: e.target.checked } : s))}
+                            className="rounded border"
+                          />
+                          <Label htmlFor="cryptopayTestnet">{t("admin.settings.cryptopay_testnet")}</Label>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.cryptopay_testnet_hint")}</p>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t">
+                      <Button type="submit" disabled={saving} className="min-w-[140px]">
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </CollapsibleContent>
+              </Collapsible>
+
+              <Collapsible defaultOpen={false} className="group mt-4">
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="w-full cursor-pointer rounded-t-lg text-left transition-colors hover:bg-muted/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                  >
+                    <CardHeader className="pointer-events-none [&_.chevron]:transition-transform [&_.chevron]:duration-200 group-data-[state=open]:[&_.chevron]:rotate-180">
+                      <div className="flex items-center justify-between pr-2">
+                        <div className="flex items-center gap-2">
+                          <Wallet className="h-5 w-5 text-primary" />
+                          <CardTitle>Heleket</CardTitle>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.heleket_crypto")}</span>
+                        </div>
+                        <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t("admin.settings.heleket_register")}
+                      </p>
+                    </CardHeader>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <CardContent className="space-y-4 border-t pt-4">
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.heleket_webhook")}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          readOnly
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/heleket` : t("admin.settings.specify_url_hint")}
+                          className="font-mono text-sm bg-muted/50"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={async () => {
+                            const url = (settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/heleket` : "";
+                            if (url && navigator.clipboard) {
+                              await navigator.clipboard.writeText(url);
+                              setHeleketWebhookCopied(true);
+                              setTimeout(() => setHeleketWebhookCopied(false), 2000);
+                            }
+                          }}
+                          disabled={!(settings.publicAppUrl ?? "").trim()}
+                          title={t("admin.settings.copy")}
+                        >
+                          {heleketWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.heleket_webhook_hint")}</p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {t("admin.settings.heleket_desc")}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.heleket_merchant")}</Label>
+                        <Input
+                          value={settings.heleketMerchantId ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, heleketMerchantId: e.target.value || null } : s))}
+                          placeholder="8b03432e-385b-4670-8d06-064591096795"
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.heleket_merchant_hint")}</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.heleket_api_key")}</Label>
+                        <Input
+                          type="password"
+                          value={settings.heleketApiKey ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, heleketApiKey: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.heleket_key_placeholder")}
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.heleket_key_hint")}</p>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t">
+                      <Button type="submit" disabled={saving} className="min-w-[140px]">
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </CollapsibleContent>
+              </Collapsible>
+
+              <Collapsible defaultOpen={false} className="group mt-4">
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="w-full cursor-pointer rounded-t-lg text-left transition-colors hover:bg-muted/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                  >
+                    <CardHeader className="pointer-events-none [&_.chevron]:transition-transform [&_.chevron]:duration-200 group-data-[state=open]:[&_.chevron]:rotate-180">
+                      <div className="flex items-center justify-between pr-2">
+                        <div className="flex items-center gap-2">
+                          <Wallet className="h-5 w-5 text-primary" />
+                          <CardTitle>LAVA</CardTitle>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.lava_desc_short")}</span>
+                        </div>
+                        <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t("admin.settings.lava_register")}
+                      </p>
+                    </CardHeader>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <CardContent className="space-y-4 border-t pt-4">
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.lava_webhook")}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          readOnly
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/lava` : t("admin.settings.specify_url_hint")}
+                          className="font-mono text-sm bg-muted/50"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={async () => {
+                            const url = (settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/lava` : "";
+                            if (url && navigator.clipboard) {
+                              await navigator.clipboard.writeText(url);
+                              setLavaWebhookCopied(true);
+                              setTimeout(() => setLavaWebhookCopied(false), 2000);
+                            }
+                          }}
+                          disabled={!(settings.publicAppUrl ?? "").trim()}
+                          title={t("admin.settings.copy")}
+                        >
+                          {lavaWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.lava_webhook_hint")}</p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {t("admin.settings.lava_desc")}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.lava_shop_id")}</Label>
+                        <Input
+                          value={settings.lavaShopId ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, lavaShopId: e.target.value || null } : s))}
+                          placeholder="00000000-0000-0000-0000-000000000000"
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.lava_shop_id_hint")}</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.lava_secret_key")}</Label>
+                        <Input
+                          type="password"
+                          value={settings.lavaSecretKey ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, lavaSecretKey: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.lava_secret_key_placeholder")}
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.lava_secret_key_hint")}</p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label>{t("admin.settings.lava_additional_key")}</Label>
+                        <Input
+                          type="password"
+                          value={settings.lavaAdditionalKey ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, lavaAdditionalKey: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.lava_additional_key_placeholder")}
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.lava_additional_key_hint")}</p>
+                      </div>
+                    </div>
+
+                    {/* ─── Lava.top — отдельный провайдер, product/offer модель ─── */}
+                    <div className="pt-4 mt-4 border-t border-dashed">
+                      <h4 className="text-sm font-semibold mb-2">Lava.top (gate.lava.top)</h4>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Новый Lava (lava.top) — отличается от Lava Business (lava.ru). Использует продукты/офферы:
+                        в ЛК Lava.top создайте продукт с одним или несколькими offer'ами, скопируйте API-ключ
+                        и UUID дефолтного оффера. <a className="text-primary underline" href="https://developers.lava.top/ru" target="_blank" rel="noopener noreferrer">developers.lava.top</a> · <a className="text-primary underline" href="https://gate.lava.top/docs" target="_blank" rel="noopener noreferrer">Swagger</a>
+                      </p>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Webhook URL: <code className="font-mono">{(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/lavatop</code>
+                        <br/>IP whitelist Lava.top для webhook'ов: <code className="font-mono">158.160.60.174</code>
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>API-ключ Lava.top</Label>
+                          <Input
+                            type="password"
+                            value={settings.lavatopApiKey ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, lavatopApiKey: e.target.value || null } : s))}
+                            placeholder="********"
+                          />
+                          <p className="text-xs text-muted-foreground">ЛК Lava.top → Integrations → Public API</p>
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Default Offer ID (UUID)</Label>
+                          <Input
+                            value={settings.lavatopDefaultOfferId ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, lavatopDefaultOfferId: e.target.value || null } : s))}
+                            placeholder="00000000-0000-0000-0000-000000000000"
+                          />
+                          <p className="text-xs text-muted-foreground">UUID оффера. Используется как фолбэк если у тарифа нет своего offerId.</p>
+                        </div>
+                      </div>
+
+                      {/* ─── Список офферов из Lava.top API ─── */}
+                      <LavatopOffersBrowser />
+                    </div>
+
+                    <div className="pt-2 border-t">
+                      <Button type="submit" disabled={saving} className="min-w-[140px]">
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </CollapsibleContent>
+              </Collapsible>
+
+              <Collapsible defaultOpen={false} className="group mt-4">
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="w-full cursor-pointer rounded-t-lg text-left transition-colors hover:bg-muted/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                  >
+                    <CardHeader className="pointer-events-none [&_.chevron]:transition-transform [&_.chevron]:duration-200 group-data-[state=open]:[&_.chevron]:rotate-180">
+                      <div className="flex items-center justify-between pr-2">
+                        <div className="flex items-center gap-2">
+                          <Wallet className="h-5 w-5 text-primary" />
+                          <CardTitle>Overpay</CardTitle>
+                          <span className="text-xs font-normal text-muted-foreground">{t("admin.settings.overpay_desc_short")}</span>
+                        </div>
+                        <ChevronDown className="chevron h-5 w-5 shrink-0 text-muted-foreground" />
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t("admin.settings.overpay_register")}
+                      </p>
+                    </CardHeader>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <CardContent className="space-y-4 border-t pt-4">
+                    <div className="space-y-2">
+                      <Label>{t("admin.settings.overpay_webhook")}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          readOnly
+                          value={(settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/overpay` : t("admin.settings.specify_url_hint")}
+                          className="font-mono text-sm bg-muted/50"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={async () => {
+                            const url = (settings.publicAppUrl ?? "").replace(/\/$/, "") ? `${(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/overpay` : "";
+                            if (url && navigator.clipboard) {
+                              await navigator.clipboard.writeText(url);
+                              setOverpayWebhookCopied(true);
+                              setTimeout(() => setOverpayWebhookCopied(false), 2000);
+                            }
+                          }}
+                          disabled={!(settings.publicAppUrl ?? "").trim()}
+                          title={t("admin.settings.copy")}
+                        >
+                          {overpayWebhookCopied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t("admin.settings.overpay_webhook_hint")}</p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {t("admin.settings.overpay_desc")}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label>{t("admin.settings.overpay_api_url")}</Label>
+                        <Input
+                          value={settings.overpayApiUrl ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, overpayApiUrl: e.target.value || null } : s))}
+                          placeholder="https://api.overpay.io"
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.overpay_api_url_hint")}</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.overpay_project_id")}</Label>
+                        <Input
+                          value={settings.overpayProjectId ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, overpayProjectId: e.target.value || null } : s))}
+                          placeholder="1234"
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.overpay_project_id_hint")}</p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("admin.settings.overpay_login")}</Label>
+                        <Input
+                          value={settings.overpayLogin ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, overpayLogin: e.target.value || null } : s))}
+                          placeholder="api-login"
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.overpay_login_hint")}</p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label>{t("admin.settings.overpay_password")}</Label>
+                        <Input
+                          type="password"
+                          value={settings.overpayPassword ?? ""}
+                          onChange={(e) => setSettings((s) => (s ? { ...s, overpayPassword: e.target.value || null } : s))}
+                          placeholder={t("admin.settings.overpay_password_placeholder")}
+                        />
+                        <p className="text-xs text-muted-foreground">{t("admin.settings.overpay_password_hint")}</p>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t">
+                      <Button type="submit" disabled={saving} className="min-w-[140px]">
+                        {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                       </Button>
                     </div>
                   </CardContent>
@@ -1743,21 +3538,287 @@ export function SettingsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="mail-telegram">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Mail className="h-5 w-5" />
-                  SMTP (письма подтверждения регистрации)
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Настройки почтового сервера для отправки ссылки подтверждения при регистрации по email.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-4">
+          <TabsContent value="ai">
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-fuchsia-500/10 via-pink-500/10 to-purple-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-fuchsia-500/5 via-transparent to-purple-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-fuchsia-500/30 via-pink-500/20 to-purple-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <Sparkles className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-fuchsia-500 via-pink-500 to-purple-500">
+                      {t("admin.settings.ai_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.ai_subtitle")} {t("admin.settings.ai_integration_hint")}</p>
+                  </div>
+                </div>
+              </div>
+              <CardContent className="space-y-4 p-4 sm:p-6">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>Хост SMTP</Label>
+                    <Label>{t("admin.settings.ai_groq_key")}</Label>
+                    <Input
+                      type="password"
+                      value={settings.groqApiKey ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, groqApiKey: e.target.value || null } : s))}
+                      placeholder="gsk_..."
+                    />
+                    <p className="text-xs text-muted-foreground">{t("admin.settings.ai_key_hint")}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("admin.settings.ai_model")}</Label>
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      value={settings.groqModel ?? "llama3-8b-8192"}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, groqModel: e.target.value } : s))}
+                    >
+                      <option value="llama3-8b-8192">llama3-8b-8192</option>
+                      <option value="llama3-70b-8192">llama3-70b-8192</option>
+                      <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                      <option value="llama-3.1-70b-versatile">llama-3.1-70b-versatile</option>
+                      <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+                      <option value="deepseek-r1-distill-llama-70b">deepseek-r1-distill-llama-70b</option>
+                      <option value="deepseek-r1-distill-qwen-32b">deepseek-r1-distill-qwen-32b</option>
+                      <option value="qwen-2.5-32b">qwen-2.5-32b</option>
+                      <option value="qwen-2.5-coder-32b">qwen-2.5-coder-32b</option>
+                      <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                      <option value="llama3-70b-8192">llama3-70b-8192</option>
+                      <option value="llama3-8b-8192">llama3-8b-8192</option>
+                      <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
+                      <option value="gemma2-9b-it">gemma2-9b-it</option>
+                    </select>
+                    <p className="text-xs text-muted-foreground">{t("admin.settings.ai_model_hint")}</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.ai_fallback")}</Label>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    {t("admin.settings.ai_fallback_hint")}
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background disabled:opacity-50"
+                      value={settings.groqFallback1 ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, groqFallback1: e.target.value || null } : s))}
+                    >
+                      <option value="">{t("admin.settings.ai_no_fallback")} 1</option>
+                      <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+                      <option value="deepseek-r1-distill-llama-70b">deepseek-r1-distill-llama-70b</option>
+                      <option value="deepseek-r1-distill-qwen-32b">deepseek-r1-distill-qwen-32b</option>
+                      <option value="qwen-2.5-32b">qwen-2.5-32b</option>
+                      <option value="qwen-2.5-coder-32b">qwen-2.5-coder-32b</option>
+                      <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                      <option value="llama3-70b-8192">llama3-70b-8192</option>
+                      <option value="llama3-8b-8192">llama3-8b-8192</option>
+                      <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
+                      <option value="gemma2-9b-it">gemma2-9b-it</option>
+                    </select>
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background disabled:opacity-50"
+                      value={settings.groqFallback2 ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, groqFallback2: e.target.value || null } : s))}
+                    >
+                      <option value="">{t("admin.settings.ai_no_fallback")} 2</option>
+                      <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+                      <option value="deepseek-r1-distill-llama-70b">deepseek-r1-distill-llama-70b</option>
+                      <option value="deepseek-r1-distill-qwen-32b">deepseek-r1-distill-qwen-32b</option>
+                      <option value="qwen-2.5-32b">qwen-2.5-32b</option>
+                      <option value="qwen-2.5-coder-32b">qwen-2.5-coder-32b</option>
+                      <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                      <option value="llama3-70b-8192">llama3-70b-8192</option>
+                      <option value="llama3-8b-8192">llama3-8b-8192</option>
+                      <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
+                      <option value="gemma2-9b-it">gemma2-9b-it</option>
+                    </select>
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background disabled:opacity-50"
+                      value={settings.groqFallback3 ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, groqFallback3: e.target.value || null } : s))}
+                    >
+                      <option value="">{t("admin.settings.ai_no_fallback")} 3</option>
+                      <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+                      <option value="deepseek-r1-distill-llama-70b">deepseek-r1-distill-llama-70b</option>
+                      <option value="deepseek-r1-distill-qwen-32b">deepseek-r1-distill-qwen-32b</option>
+                      <option value="qwen-2.5-32b">qwen-2.5-32b</option>
+                      <option value="qwen-2.5-coder-32b">qwen-2.5-coder-32b</option>
+                      <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                      <option value="llama3-70b-8192">llama3-70b-8192</option>
+                      <option value="llama3-8b-8192">llama3-8b-8192</option>
+                      <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
+                      <option value="gemma2-9b-it">gemma2-9b-it</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.ai_system_prompt")}</Label>
+                  <textarea
+                    className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    value={settings.aiSystemPrompt ?? ""}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, aiSystemPrompt: e.target.value } : s))}
+                    placeholder="Ты — лучший менеджер техподдержки VPN-сервиса..."
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("admin.settings.ai_prompt_hint")}
+                  </p>
+                </div>
+                <div className="pt-2 border-t">
+                  <Button type="submit" disabled={saving} className="min-w-[140px]">
+                    {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="mail-telegram">
+            <Card className="overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-cyan-500/10 via-teal-500/10 to-sky-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-sky-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-cyan-500/30 via-teal-500/20 to-sky-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <Mail className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-cyan-500 via-teal-500 to-sky-500">
+                      {t("admin.settings.smtp_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.smtp_subtitle")}</p>
+                  </div>
+                </div>
+              </div>
+              <CardContent className="space-y-5 p-4 sm:p-6">
+
+                {/* ───── Happ Crypto Link ───── */}
+                <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                      <span className="text-sm">🔗</span>
+                    </div>
+                    <h3 className="text-base font-semibold">Happ Crypto Link</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Шифрует ссылки подписки в формат <code className="text-xs">happ://crypt4/...</code> через
+                    встроенный API Remnawave. <b>Скрывает оригинальный URL подписки</b> от пользователя.
+                    Минус: зашифрованная ссылка длиннее (~1500 символов) — в Telegram-сообщениях выглядит
+                    как простыня. Рекомендуется только если у вас публичная панель и важно скрыть домен подписки.
+                  </p>
+                  <label className="flex items-center gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.happCryptEnabled === true}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, happCryptEnabled: e.target.checked } : s))}
+                      className="rounded border w-4 h-4"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium">Шифровать ссылки подписки (Happ Crypto)</span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Выкл по умолчанию. После изменения нажмите «Сохранить» и подождите 60 сек (кэш бэкенда).
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
+                {/* ───── Антибот-защита регистраций ───── */}
+                <div className="rounded-2xl border border-red-500/20 bg-gradient-to-br from-red-500/5 via-amber-500/5 to-orange-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-red-500/20 flex items-center justify-center">
+                      <span className="text-sm">🛡️</span>
+                    </div>
+                    <h3 className="text-base font-semibold">Антибот-защита регистраций</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Блокирует регистрации с одноразовых email-доменов (example.com, mailinator и др.),
+                    подозрительных паттернов (test_xxxxxxxx@) и массовых регистраций с одного IP.
+                    Просмотр и удаление уже накопленных ботов — на странице{" "}
+                    <a href="/admin/antibot" className="text-primary underline hover:no-underline">Антибот</a>.
+                  </p>
+                  <label className="flex items-center gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.signupProtectionEnabled !== false}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, signupProtectionEnabled: e.target.checked } : s))}
+                      className="rounded border w-4 h-4"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium">Включить защиту</span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Master switch. Если выключить — никакие фильтры ниже не сработают.
+                      </p>
+                    </div>
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Лимит регистраций с одного IP в час</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        value={settings.signupMaxPerIpPerHour ?? 3}
+                        onChange={(e) =>
+                          setSettings((s) =>
+                            s ? { ...s, signupMaxPerIpPerHour: Math.max(1, parseInt(e.target.value, 10) || 3) } : s
+                          )
+                        }
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        По умолчанию 3. Семья с одним IP не пострадает, ботнет — отсечётся.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Дополнительный список заблокированных доменов</Label>
+                    <textarea
+                      rows={3}
+                      value={settings.emailDomainBlocklist ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, emailDomainBlocklist: e.target.value } : s))}
+                      placeholder="badmail.ru, fake-domain.com"
+                      className="w-full rounded-xl border border-white/10 bg-card/40 px-3 py-2 text-sm font-mono"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Через запятую или с новой строки. Расширяет встроенный список (example.com, mailinator,
+                      tempmail и др.).
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Regex-паттерны для блокировки email</Label>
+                    <textarea
+                      rows={3}
+                      value={settings.emailPatternBlocklist ?? ""}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, emailPatternBlocklist: e.target.value } : s))}
+                      placeholder={"^junk\\d+@\n^fake_"}
+                      className="w-full rounded-xl border border-white/10 bg-card/40 px-3 py-2 text-sm font-mono"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      По одному regex на строку (без флагов, регистр игнорируется). Встроенные:{" "}
+                      <code className="text-xs">test_xxxxxxxx@</code>, <code className="text-xs">bot_NNN@</code>,
+                      последовательности цифр.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 via-teal-500/5 to-sky-500/5 p-5 space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-cyan-500/20 flex items-center justify-center"><Mail className="h-4 w-4 text-cyan-500" /></div>
+                    <h3 className="text-base font-semibold">SMTP-сервер</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Параметры почтового сервера для отправки email с письмами регистрации, восстановления пароля и системных уведомлений.</p>
+                <label className="flex items-center gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    id="skipEmailVerification"
+                    checked={settings.skipEmailVerification ?? false}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, skipEmailVerification: e.target.checked } : s))}
+                    className="rounded border w-4 h-4"
+                  />
+                  <div className="flex-1">
+                    <span className="text-sm font-medium">{t("admin.settings.skip_email")}</span>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">{t("admin.settings.smtp_no_confirm_hint")}</p>
+                  </div>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>{t("admin.settings.smtp_host")}</Label>
                     <Input
                       value={settings.smtpHost ?? ""}
                       onChange={(e) => setSettings((s) => (s ? { ...s, smtpHost: e.target.value || null } : s))}
@@ -1765,7 +3826,7 @@ export function SettingsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Порт</Label>
+                    <Label>{t("admin.settings.smtp_port")}</Label>
                     <Input
                       type="number"
                       min={1}
@@ -1787,7 +3848,7 @@ export function SettingsPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>Пользователь SMTP</Label>
+                    <Label>{t("admin.settings.smtp_user")}</Label>
                     <Input
                       value={settings.smtpUser ?? ""}
                       onChange={(e) => setSettings((s) => (s ? { ...s, smtpUser: e.target.value || null } : s))}
@@ -1795,7 +3856,7 @@ export function SettingsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Пароль (оставьте пустым, чтобы не менять)</Label>
+                    <Label>{t("admin.settings.smtp_password")}</Label>
                     <Input
                       type="password"
                       value={settings.smtpPassword ?? ""}
@@ -1806,7 +3867,7 @@ export function SettingsPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>От кого (email)</Label>
+                    <Label>{t("admin.settings.smtp_from_email")}</Label>
                     <Input
                       type="email"
                       value={settings.smtpFromEmail ?? ""}
@@ -1815,29 +3876,35 @@ export function SettingsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Имя отправителя</Label>
+                    <Label>{t("admin.settings.smtp_from_name")}</Label>
                     <Input
                       value={settings.smtpFromName ?? ""}
                       onChange={(e) => setSettings((s) => (s ? { ...s, smtpFromName: e.target.value || null } : s))}
-                      placeholder="Название сервиса"
+                      placeholder={t("admin.settings.smtp_service_name_placeholder")}
                     />
                   </div>
                 </div>
+                </div>
               </CardContent>
             </Card>
-            <Card className="mt-6">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <MessageCircle className="h-5 w-5" />
-                  Telegram
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Бот для входа и регистрации через Telegram. Укажите username бота (без @) — кнопка «Войти через Telegram» появится на страницах входа и регистрации.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-4">
+            <Card className="mt-6 overflow-hidden border-white/10">
+              <div className="relative bg-gradient-to-br from-sky-500/10 via-blue-500/10 to-cyan-500/10 p-6 sm:p-8 border-b border-white/10">
+                <div className="absolute inset-0 bg-gradient-to-br from-sky-500/5 via-transparent to-cyan-500/5 pointer-events-none" />
+                <div className="relative flex items-start gap-5">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-sky-500/30 via-blue-500/20 to-cyan-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                    <MessageCircle className="h-7 w-7 text-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-sky-500 via-blue-500 to-cyan-500">
+                      {t("admin.settings.telegram_title")}
+                    </h2>
+                    <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.telegram_bot_hint")}</p>
+                  </div>
+                </div>
+              </div>
+              <CardContent className="space-y-4 p-4 sm:p-6">
                 <div className="space-y-2">
-                  <Label>Токен бота (BotFather)</Label>
+                  <Label>{t("admin.settings.telegram_bot_token")}</Label>
                   <Input
                     type="password"
                     value={settings.telegramBotToken ?? ""}
@@ -1846,7 +3913,7 @@ export function SettingsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Username бота (без @)</Label>
+                  <Label>{t("admin.settings.telegram_bot_username")}</Label>
                   <Input
                     value={settings.telegramBotUsername ?? ""}
                     onChange={(e) => setSettings((s) => (s ? { ...s, telegramBotUsername: e.target.value || null } : s))}
@@ -1854,9 +3921,9 @@ export function SettingsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Админы бота (Telegram ID)</Label>
+                  <Label>{t("admin.settings.telegram_admins")}</Label>
                   <p className="text-xs text-muted-foreground">
-                    Пользователи с этими Telegram ID увидят в боте кнопку «Панель админа» (ссылка на веб-панель). Узнать свой ID: @userinfobot или в настройках бота.
+                    {t("admin.settings.telegram_admins_hint")}
                   </p>
                   <div className="flex flex-wrap gap-2 items-center">
                     {(settings.botAdminTelegramIds ?? []).map((id) => (
@@ -1866,7 +3933,7 @@ export function SettingsPage() {
                           type="button"
                           onClick={() => setSettings((s) => (s ? { ...s, botAdminTelegramIds: (s.botAdminTelegramIds ?? []).filter((x) => x !== id) } : s))}
                           className="text-muted-foreground hover:text-destructive"
-                          title="Удалить"
+                          title={t("admin.settings.telegram_delete")}
                         >
                           ×
                         </button>
@@ -1903,14 +3970,14 @@ export function SettingsPage() {
                           }
                         }}
                       >
-                        Добавить ID
+                        {t("admin.settings.add_id")}
                       </Button>
                     </div>
                   </div>
                 </div>
                 {message && <p className="text-sm text-muted-foreground">{message}</p>}
                 <Button type="submit" disabled={saving}>
-                  {saving ? "Сохранение…" : "Сохранить"}
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
                 </Button>
               </CardContent>
             </Card>
@@ -1918,32 +3985,34 @@ export function SettingsPage() {
         </form>
 
         <TabsContent value="theme">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between rounded-xl border p-4 bg-background/50 mb-6">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-pink-500/10 via-rose-500/10 to-fuchsia-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-pink-500/5 via-transparent to-fuchsia-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-pink-500/30 via-rose-500/20 to-fuchsia-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Palette className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-pink-500 via-rose-500 to-fuchsia-500">
+                    {t("admin.settings.theme_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.theme_global_hint")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
+              <div className="flex items-center justify-between rounded-xl border border-white/10 p-4 bg-card/40">
                 <div className="space-y-0.5">
-                  <Label className="text-base">Выбор темы пользователями</Label>
-                  <p className="text-sm text-muted-foreground">
-                    Если включено, клиенты в кабинете смогут сами выбирать цвет интерфейса. Если выключено — у всех будет цвет, выбранный ниже, а кнопка смены цвета скроется.
-                  </p>
+                  <Label className="text-base font-medium">{t("admin.settings.theme_user_choice")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("admin.settings.theme_user_choice_hint")}</p>
                 </div>
                 <Switch
                   checked={Boolean((settings as any)?.allowUserThemeChange ?? true)}
                   onCheckedChange={(c: boolean) => setSettings((s) => s ? { ...s, allowUserThemeChange: c } : s)}
                 />
               </div>
-              <CardTitle className="flex items-center gap-2">
-                <Palette className="h-5 w-5" />
-                Глобальная тема
-              </CardTitle>
-              <p className="text-sm text-muted-foreground">
-                Выберите цветовую тему, которая будет применена ко всему сайту: админке, кабинету клиента и мини-апп.
-                Переключатель тёмная/светлая всегда доступен в шапке.
-              </p>
-            </CardHeader>
-            <CardContent className="space-y-6">
               <div>
-                <Label className="text-sm font-medium mb-3 block">Цветовой акцент</Label>
+                <Label className="text-sm font-medium mb-3 block">{t("admin.settings.theme_accent")}</Label>
                 <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
                   {(Object.entries(ACCENT_PALETTES) as [string, { label: string; swatch: string }][]).map(([key, palette]) => {
                     const selected = (settings.themeAccent ?? "default") === key;
@@ -1980,13 +4049,13 @@ export function SettingsPage() {
                     setSaving(true);
                     setMessage("");
                     api.updateSettings(token, { themeAccent: settings.themeAccent ?? "default", allowUserThemeChange: (settings as any).allowUserThemeChange ?? true })
-                      .then(() => setMessage("Тема сохранена"))
-                      .catch(() => setMessage("Ошибка сохранения"))
+                      .then(() => setMessage(t("admin.settings.theme_saved")))
+                      .catch(() => setMessage(t("admin.settings.save_error")))
                       .finally(() => setSaving(false));
                   }}
                   disabled={saving}
                 >
-                  {saving ? "Сохранение…" : "Сохранить тему"}
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save_theme")}
                 </Button>
               </div>
             </CardContent>
@@ -1994,30 +4063,35 @@ export function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="options">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Package className="h-5 w-5" />
-                Продажа опций
-              </CardTitle>
-              <p className="text-sm text-muted-foreground">
-                Доп. трафик, доп. устройства и доп. серверы (сквады) — клиенты могут докупать их после оформления подписки. Опции применяются к пользователю в Remna после оплаты.
-              </p>
-            </CardHeader>
-            <CardContent className="space-y-6">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-yellow-500/10 via-amber-500/10 to-orange-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-yellow-500/5 via-transparent to-orange-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-yellow-500/30 via-amber-500/20 to-orange-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Package className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-yellow-500 via-amber-500 to-orange-500">
+                    {t("admin.settings.options_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.options_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
               <div className="flex items-center gap-2">
                 <Switch
                   id="sell-options-enabled"
                   checked={settings.sellOptionsEnabled ?? false}
                   onCheckedChange={(c: boolean) => setSettings((s) => (s ? { ...s, sellOptionsEnabled: !!c } : s))}
                 />
-                <Label htmlFor="sell-options-enabled" className="cursor-pointer">Включить продажу опций</Label>
+                <Label htmlFor="sell-options-enabled" className="cursor-pointer">{t("admin.settings.options_enable")}</Label>
               </div>
 
               <Collapsible defaultOpen>
                 <CollapsibleTrigger className="flex items-center gap-2 font-medium">
                   <ChevronDown className="h-4 w-4" />
-                  Доп. трафик (ГБ)
+                  {t("admin.settings.options_traffic")}
                 </CollapsibleTrigger>
                 <CollapsibleContent className="pt-3 space-y-3">
                   <div className="flex items-center gap-2 mb-3">
@@ -2026,23 +4100,23 @@ export function SettingsPage() {
                       checked={settings.sellOptionsTrafficEnabled ?? false}
                       onCheckedChange={(c: boolean) => setSettings((s) => (s ? { ...s, sellOptionsTrafficEnabled: !!c } : s))}
                     />
-                    <Label htmlFor="sell-traffic-enabled" className="cursor-pointer">Включить</Label>
+                    <Label htmlFor="sell-traffic-enabled" className="cursor-pointer">{t("admin.settings.options_enable_short")}</Label>
                   </div>
                   <div className="rounded-md border overflow-x-auto overflow-hidden">
                     <table className="w-full text-sm min-w-[400px] [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
                       <thead>
                         <tr className="border-b bg-muted/50">
-                          <th className="text-left p-2 font-medium">Название</th>
-                          <th className="text-left p-2 font-medium w-24">ГБ</th>
-                          <th className="text-left p-2 font-medium w-28">Цена</th>
-                          <th className="text-left p-2 font-medium w-24">Валюта</th>
+                          <th className="text-left p-2 font-medium">{t("admin.settings.options_col_name")}</th>
+                          <th className="text-left p-2 font-medium w-24">{t("admin.settings.options_col_gb")}</th>
+                          <th className="text-left p-2 font-medium w-28">{t("admin.settings.options_col_price")}</th>
+                          <th className="text-left p-2 font-medium w-24">{t("admin.settings.options_col_currency")}</th>
                           <th className="w-10" />
                         </tr>
                       </thead>
                       <tbody>
                         {(settings.sellOptionsTrafficProducts ?? []).map((p, i) => (
                           <tr key={p.id} className="border-b last:border-0">
-                            <td className="p-2"><Input className="h-9 w-full max-w-[180px]" placeholder="Название" value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsTrafficProducts) return s; const arr = [...s.sellOptionsTrafficProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsTrafficProducts: arr }; })} /></td>
+                            <td className="p-2"><Input className="h-9 w-full max-w-[180px]" placeholder={t("admin.settings.options_name_placeholder")} value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsTrafficProducts) return s; const arr = [...s.sellOptionsTrafficProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsTrafficProducts: arr }; })} /></td>
                             <td className="p-2"><Input type="number" min={0.1} step={0.5} className="h-9 w-full" value={p.trafficGb || ""} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsTrafficProducts) return s; const arr = [...s.sellOptionsTrafficProducts]; arr[i] = { ...arr[i], trafficGb: parseFloat(e.target.value) || 0 }; return { ...s, sellOptionsTrafficProducts: arr }; })} /></td>
                             <td className="p-2"><Input type="number" min={0} step={1} className="h-9 w-full" value={p.price || ""} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsTrafficProducts) return s; const arr = [...s.sellOptionsTrafficProducts]; arr[i] = { ...arr[i], price: parseFloat(e.target.value) || 0 }; return { ...s, sellOptionsTrafficProducts: arr }; })} /></td>
                             <td className="p-2">
@@ -2058,7 +4132,7 @@ export function SettingsPage() {
                   </div>
                   <div className="mt-3">
                     <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, sellOptionsTrafficProducts: [...(s.sellOptionsTrafficProducts ?? []), { id: `traffic_${Date.now()}`, name: "", trafficGb: 5, price: 0, currency: "rub" }] } : s))}>
-                      <Plus className="h-4 w-4 mr-1" /> Добавить
+                      <Plus className="h-4 w-4 mr-1" /> {t("admin.settings.options_add")}
                     </Button>
                   </div>
                 </CollapsibleContent>
@@ -2067,7 +4141,7 @@ export function SettingsPage() {
               <Collapsible defaultOpen>
                 <CollapsibleTrigger className="flex items-center gap-2 font-medium">
                   <ChevronDown className="h-4 w-4" />
-                  Доп. устройства
+                  {t("admin.settings.options_devices")}
                 </CollapsibleTrigger>
                 <CollapsibleContent className="pt-3 space-y-3">
                   <div className="flex items-center gap-2 mb-3">
@@ -2076,23 +4150,23 @@ export function SettingsPage() {
                       checked={settings.sellOptionsDevicesEnabled ?? false}
                       onCheckedChange={(c: boolean) => setSettings((s) => (s ? { ...s, sellOptionsDevicesEnabled: !!c } : s))}
                     />
-                    <Label htmlFor="sell-devices-enabled" className="cursor-pointer">Включить</Label>
+                    <Label htmlFor="sell-devices-enabled" className="cursor-pointer">{t("admin.settings.options_enable_short")}</Label>
                   </div>
                   <div className="rounded-md border overflow-x-auto overflow-hidden">
                     <table className="w-full text-sm min-w-[400px] [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
                       <thead>
                         <tr className="border-b bg-muted/50">
-                          <th className="text-left p-2 font-medium">Название</th>
-                          <th className="text-left p-2 font-medium w-20">Шт.</th>
-                          <th className="text-left p-2 font-medium w-28">Цена</th>
-                          <th className="text-left p-2 font-medium w-24">Валюта</th>
+                          <th className="text-left p-2 font-medium">{t("admin.settings.options_col_name")}</th>
+                          <th className="text-left p-2 font-medium w-20">{t("admin.settings.options_col_qty")}</th>
+                          <th className="text-left p-2 font-medium w-28">{t("admin.settings.options_col_price")}</th>
+                          <th className="text-left p-2 font-medium w-24">{t("admin.settings.options_col_currency")}</th>
                           <th className="w-10" />
                         </tr>
                       </thead>
                       <tbody>
                         {(settings.sellOptionsDevicesProducts ?? []).map((p, i) => (
                           <tr key={p.id} className="border-b last:border-0">
-                            <td className="p-2"><Input className="h-9 w-full max-w-[180px]" placeholder="Название" value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsDevicesProducts) return s; const arr = [...s.sellOptionsDevicesProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsDevicesProducts: arr }; })} /></td>
+                            <td className="p-2"><Input className="h-9 w-full max-w-[180px]" placeholder={t("admin.settings.options_name_placeholder")} value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsDevicesProducts) return s; const arr = [...s.sellOptionsDevicesProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsDevicesProducts: arr }; })} /></td>
                             <td className="p-2"><Input type="number" min={1} className="h-9 w-full" value={p.deviceCount || ""} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsDevicesProducts) return s; const arr = [...s.sellOptionsDevicesProducts]; arr[i] = { ...arr[i], deviceCount: parseInt(e.target.value, 10) || 0 }; return { ...s, sellOptionsDevicesProducts: arr }; })} /></td>
                             <td className="p-2"><Input type="number" min={0} step={1} className="h-9 w-full" value={p.price || ""} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsDevicesProducts) return s; const arr = [...s.sellOptionsDevicesProducts]; arr[i] = { ...arr[i], price: parseFloat(e.target.value) || 0 }; return { ...s, sellOptionsDevicesProducts: arr }; })} /></td>
                             <td className="p-2">
@@ -2108,7 +4182,7 @@ export function SettingsPage() {
                   </div>
                   <div className="mt-3">
                     <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, sellOptionsDevicesProducts: [...(s.sellOptionsDevicesProducts ?? []), { id: `devices_${Date.now()}`, name: "", deviceCount: 1, price: 0, currency: "rub" }] } : s))}>
-                      <Plus className="h-4 w-4 mr-1" /> Добавить
+                      <Plus className="h-4 w-4 mr-1" /> {t("admin.settings.options_add")}
                     </Button>
                   </div>
                 </CollapsibleContent>
@@ -2117,7 +4191,7 @@ export function SettingsPage() {
               <Collapsible defaultOpen>
                 <CollapsibleTrigger className="flex items-center gap-2 font-medium">
                   <ChevronDown className="h-4 w-4" />
-                  Доп. серверы (сквады)
+                  {t("admin.settings.options_servers")}
                 </CollapsibleTrigger>
                 <CollapsibleContent className="pt-3 space-y-3">
                   <div className="flex items-center gap-2 mb-3">
@@ -2126,28 +4200,28 @@ export function SettingsPage() {
                       checked={settings.sellOptionsServersEnabled ?? false}
                       onCheckedChange={(c: boolean) => setSettings((s) => (s ? { ...s, sellOptionsServersEnabled: !!c } : s))}
                     />
-                    <Label htmlFor="sell-servers-enabled" className="cursor-pointer">Включить</Label>
+                    <Label htmlFor="sell-servers-enabled" className="cursor-pointer">{t("admin.settings.options_enable_short")}</Label>
                   </div>
-                  <p className="text-xs text-muted-foreground">Сквады из Remna (вкладка Синхронизация). Выберите сквад и укажите цену.</p>
+                  <p className="text-xs text-muted-foreground">{t("admin.settings.options_squads_hint")}</p>
                   <div className="rounded-md border overflow-x-auto overflow-hidden">
                     <table className="w-full text-sm min-w-[520px] [&_th]:whitespace-nowrap [&_td]:whitespace-nowrap">
                       <thead>
                         <tr className="border-b bg-muted/50">
-                          <th className="text-left p-2 font-medium">Название</th>
-                          <th className="text-left p-2 font-medium">Сквад</th>
-                          <th className="text-left p-2 font-medium w-20">ГБ</th>
-                          <th className="text-left p-2 font-medium w-28">Цена</th>
-                          <th className="text-left p-2 font-medium w-24">Валюта</th>
+                          <th className="text-left p-2 font-medium">{t("admin.settings.options_col_name")}</th>
+                          <th className="text-left p-2 font-medium">{t("admin.settings.options_col_squad")}</th>
+                          <th className="text-left p-2 font-medium w-20">{t("admin.settings.options_col_gb")}</th>
+                          <th className="text-left p-2 font-medium w-28">{t("admin.settings.options_col_price")}</th>
+                          <th className="text-left p-2 font-medium w-24">{t("admin.settings.options_col_currency")}</th>
                           <th className="w-10" />
                         </tr>
                       </thead>
                       <tbody>
                         {(settings.sellOptionsServersProducts ?? []).map((p, i) => (
                           <tr key={p.id} className="border-b last:border-0">
-                            <td className="p-2"><Input className="h-9 w-full max-w-[160px]" placeholder="Название" value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsServersProducts) return s; const arr = [...s.sellOptionsServersProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsServersProducts: arr }; })} /></td>
+                            <td className="p-2"><Input className="h-9 w-full max-w-[160px]" placeholder={t("admin.settings.options_name_placeholder")} value={p.name} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsServersProducts) return s; const arr = [...s.sellOptionsServersProducts]; arr[i] = { ...arr[i], name: e.target.value }; return { ...s, sellOptionsServersProducts: arr }; })} /></td>
                             <td className="p-2">
                               <select className="h-9 rounded-md border px-2 w-full min-w-[180px] bg-background" value={p.squadUuid} onChange={(e) => setSettings((s) => { if (!s?.sellOptionsServersProducts) return s; const arr = [...s.sellOptionsServersProducts]; arr[i] = { ...arr[i], squadUuid: e.target.value }; return { ...s, sellOptionsServersProducts: arr }; })}>
-                                <option value="">— Сквад —</option>
+                                <option value="">{t("admin.settings.options_squad_none")}</option>
                                 {squads.map((sq) => <option key={sq.uuid} value={sq.uuid}>{sq.name || sq.uuid}</option>)}
                               </select>
                             </td>
@@ -2166,7 +4240,7 @@ export function SettingsPage() {
                   </div>
                   <div className="mt-3">
                     <Button type="button" variant="outline" size="sm" onClick={() => setSettings((s) => (s ? { ...s, sellOptionsServersProducts: [...(s.sellOptionsServersProducts ?? []), { id: `server_${Date.now()}`, name: "", squadUuid: squads[0]?.uuid ?? "", trafficGb: 0, price: 0, currency: "rub" }] } : s))}>
-                      <Plus className="h-4 w-4 mr-1" /> Добавить
+                      <Plus className="h-4 w-4 mr-1" /> {t("admin.settings.options_add")}
                     </Button>
                   </div>
                 </CollapsibleContent>
@@ -2174,55 +4248,1217 @@ export function SettingsPage() {
 
               <div className="pt-4 border-t">
                 {message && <p className="text-sm text-muted-foreground mb-2">{message}</p>}
-                <Button type="button" onClick={saveOptionsOnly} disabled={saving}>{saving ? "Сохранение…" : "Сохранить настройки опций"}</Button>
+                <Button type="button" onClick={saveOptionsOnly} disabled={saving}>{saving ? t("admin.settings.saving") : t("admin.settings.options_save")}</Button>
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="sync">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <RefreshCw className="h-5 w-5" />
-                Синхронизация с Remna
-              </CardTitle>
-              <p className="text-sm text-muted-foreground">
-                Загрузить пользователей из Remna в панель, отправить данные в Remna или привязать клиентов без Remna (создать им учётки в Remna).
+        <TabsContent value="custom-build">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-purple-500/10 via-violet-500/10 to-indigo-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 via-transparent to-indigo-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-purple-500/30 via-violet-500/20 to-indigo-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Layers className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-purple-500 via-violet-500 to-indigo-500">
+                    {t("admin.settings.custom_build_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.custom_build_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-4 p-4 sm:p-6">
+              <div className="flex items-center gap-3 p-3 rounded-lg border bg-muted/30">
+                <Switch
+                  id="custom-build-enabled"
+                  checked={!!settings.customBuildEnabled}
+                  onCheckedChange={(c: boolean) => setSettings((s) => (s ? { ...s, customBuildEnabled: !!c } : s))}
+                />
+                <Label htmlFor="custom-build-enabled" className="cursor-pointer font-medium">{t("admin.settings.custom_build_enable")}</Label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.custom_build_price_day")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={settings.customBuildPricePerDay ?? 0}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, customBuildPricePerDay: parseFloat(e.target.value) || 0 } : s))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.custom_build_price_device")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={settings.customBuildPricePerDevice ?? 0}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, customBuildPricePerDevice: parseFloat(e.target.value) || 0 } : s))}
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("admin.settings.custom_build_traffic")}</Label>
+                <div className="flex gap-4 items-center">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="customBuildTrafficMode"
+                      checked={(settings.customBuildTrafficMode ?? "unlimited") === "unlimited"}
+                      onChange={() => setSettings((s) => (s ? { ...s, customBuildTrafficMode: "unlimited" as const } : s))}
+                      className="rounded-full"
+                    />
+                    {t("admin.settings.custom_build_unlimited")}
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="customBuildTrafficMode"
+                      checked={(settings.customBuildTrafficMode ?? "unlimited") === "per_gb"}
+                      onChange={() => setSettings((s) => (s ? { ...s, customBuildTrafficMode: "per_gb" as const } : s))}
+                      className="rounded-full"
+                    />
+                    {t("admin.settings.custom_build_per_gb")}
+                  </label>
+                  {(settings.customBuildTrafficMode ?? "unlimited") === "per_gb" && (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        className="w-24"
+                        value={settings.customBuildPricePerGb ?? 0}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, customBuildPricePerGb: parseFloat(e.target.value) || 0 } : s))}
+                      />
+                      <span className="text-sm text-muted-foreground">за 1 ГБ</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("admin.settings.custom_build_squad")}</Label>
+                <select
+                  className="flex h-10 w-full max-w-md rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={settings.customBuildSquadUuid ?? ""}
+                  onChange={(e) => setSettings((s) => (s ? { ...s, customBuildSquadUuid: e.target.value || null } : s))}
+                >
+                  <option value="">{t("admin.settings.custom_build_squad_none")}</option>
+                  {squads.map((s) => (
+                    <option key={s.uuid} value={s.uuid}>{s.name || s.uuid}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.custom_build_currency")}</Label>
+                  <select
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={settings.customBuildCurrency ?? "rub"}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, customBuildCurrency: e.target.value } : s))}
+                  >
+                    {ALLOWED_CURRENCIES.map((c) => (
+                      <option key={c} value={c}>{c.toUpperCase()}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.custom_build_max_days")}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={360}
+                    value={settings.customBuildMaxDays ?? 360}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, customBuildMaxDays: Math.min(360, Math.max(1, parseInt(e.target.value, 10) || 360)) } : s))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("admin.settings.custom_build_max_devices")}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={settings.customBuildMaxDevices ?? 10}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, customBuildMaxDevices: Math.min(20, Math.max(1, parseInt(e.target.value, 10) || 10)) } : s))}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("admin.settings.custom_build_hint")}
               </p>
-            </CardHeader>
-            <CardContent className="flex flex-wrap items-center gap-3">
+              <div className="pt-2 flex items-center gap-2">
+                <Button
+                  type="button"
+                  disabled={saving}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSubmit(e as unknown as React.FormEvent);
+                  }}
+                >
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
+                {message && <span className="text-sm text-muted-foreground">{message}</span>}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="oauth">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-zinc-500/10 via-slate-500/10 to-stone-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-zinc-500/5 via-transparent to-stone-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-zinc-500/30 via-slate-500/20 to-stone-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <KeyRound className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-zinc-500 via-slate-500 to-stone-500">
+                    {t("admin.settings.oauth_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.oauth_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
+              <div className="space-y-4 rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-medium">Google Sign In</h3>
+                    <p className="text-xs text-muted-foreground">{t("admin.settings.oauth_google_hint")}</p>
+                  </div>
+                  <Switch
+                    checked={settings?.googleLoginEnabled ?? false}
+                    onCheckedChange={(v) => setSettings((s) => (s ? { ...s, googleLoginEnabled: v } : s))}
+                  />
+                </div>
+                {settings?.googleLoginEnabled && (
+                  <div className="space-y-3">
+                    <div>
+                      <Label>Client ID</Label>
+                      <Input
+                        placeholder="xxxx.apps.googleusercontent.com"
+                        value={settings.googleClientId ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, googleClientId: e.target.value || null } : s))}
+                      />
+                    </div>
+                    <div>
+                      <Label>{t("admin.settings.oauth_google_secret")}</Label>
+                      <Input
+                        type="password"
+                        placeholder="GOCSPX-..."
+                        value={settings.googleClientSecret ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, googleClientSecret: e.target.value || null } : s))}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {t("admin.settings.oauth_google_secret_hint")}
+                      </p>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t("admin.settings.oauth_google_origins_hint")}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-4 rounded-lg border p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-medium">Apple Sign In</h3>
+                    <p className="text-xs text-muted-foreground">{t("admin.settings.oauth_apple_hint")}</p>
+                  </div>
+                  <Switch
+                    checked={settings?.appleLoginEnabled ?? false}
+                    onCheckedChange={(v) => setSettings((s) => (s ? { ...s, appleLoginEnabled: v } : s))}
+                  />
+                </div>
+                {settings?.appleLoginEnabled && (
+                  <div className="space-y-3">
+                    <div>
+                      <Label>Services ID (Client ID)</Label>
+                      <Input
+                        placeholder="com.example.service"
+                        value={settings.appleClientId ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, appleClientId: e.target.value || null } : s))}
+                      />
+                    </div>
+                    <div>
+                      <Label>Team ID</Label>
+                      <Input
+                        placeholder="XXXXXXXXXX"
+                        value={settings.appleTeamId ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, appleTeamId: e.target.value || null } : s))}
+                      />
+                    </div>
+                    <div>
+                      <Label>Key ID</Label>
+                      <Input
+                        placeholder="YYYYYYYYYY"
+                        value={settings.appleKeyId ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, appleKeyId: e.target.value || null } : s))}
+                      />
+                    </div>
+                    <div>
+                      <Label>Private Key (.p8)</Label>
+                      <Textarea
+                        rows={4}
+                        placeholder="-----BEGIN PRIVATE KEY-----&#10;..."
+                        value={settings.applePrivateKey ?? ""}
+                        onChange={(e) => setSettings((s) => (s ? { ...s, applePrivateKey: e.target.value || null } : s))}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t("admin.settings.oauth_apple_desc")} Return URL: <code>{`${window.location.origin}/cabinet/login`}</code>
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-2 flex items-center gap-2">
+                <Button
+                  type="button"
+                  disabled={saving}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSubmit(e as unknown as React.FormEvent);
+                  }}
+                >
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
+                {message && <span className="text-sm text-muted-foreground">{message}</span>}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="landing">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-green-500/10 via-emerald-500/10 to-teal-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 via-transparent to-teal-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-green-500/30 via-emerald-500/20 to-teal-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Globe className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl font-bold tracking-tight">{t("admin.settings.tab_landing")}</h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">
+                    Лендинг переехал в отдельный блочный редактор: drag-drop секций, превью без сохранения, шрифты и снапшоты.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <CardContent className="p-6 sm:p-8">
+              <div className="rounded-2xl border border-white/10 bg-white/40 dark:bg-white/5 p-8 text-center">
+                <Globe className="mx-auto h-10 w-10 text-emerald-500" />
+                <h3 className="mt-4 text-lg font-semibold">Откройте редактор лендинга</h3>
+                <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
+                  Здесь больше нет полей: тексты, картинки, шрифты, цвета и порядок секций редактируются в визуальном редакторе.
+                </p>
+                <Button asChild size="lg" className="mt-6 gap-2">
+                  <Link to="/admin/landing-editor">
+                    <Globe className="h-4 w-4" />
+                    Перейти в редактор
+                  </Link>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="server-ssh">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-stone-500/10 via-zinc-500/10 to-slate-600/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-stone-500/5 via-transparent to-slate-600/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-stone-500/30 via-zinc-500/20 to-slate-600/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Terminal className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-stone-400 via-zinc-400 to-slate-400">
+                    {t("admin.settings.ssh_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.ssh_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
+              {!sshConfig ? (
+                <p className="text-sm text-muted-foreground py-4">
+                  {t("admin.settings.ssh_not_found")}
+                </p>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t("admin.settings.ssh_port")}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={sshConfig.port}
+                      onChange={(e) => setSshConfig({ ...sshConfig, port: parseInt(e.target.value, 10) || 22 })}
+                    />
+                    <p className="text-xs text-muted-foreground">Стандартный порт — 22. Смена порта снижает количество ботов.</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>{t("admin.settings.ssh_root_login")}</Label>
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={sshConfig.permitRootLogin}
+                      onChange={(e) => setSshConfig({ ...sshConfig, permitRootLogin: e.target.value })}
+                    >
+                      <option value="yes">yes — разрешён вход по паролю и ключу</option>
+                      <option value="prohibit-password">prohibit-password — только по ключу</option>
+                      <option value="no">no — полностью запрещён</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-lg border p-4">
+                    <div className="space-y-0.5">
+                      <Label className="text-base font-medium">{t("admin.settings.ssh_password_auth")}</Label>
+                      <p className="text-sm text-muted-foreground">PasswordAuthentication — отключите, если используете только ключи</p>
+                    </div>
+                    <Switch
+                      checked={sshConfig.passwordAuthentication}
+                      onCheckedChange={(v) => setSshConfig({ ...sshConfig, passwordAuthentication: v })}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-lg border p-4">
+                    <div className="space-y-0.5">
+                      <Label className="text-base font-medium">{t("admin.settings.ssh_pubkey_auth")}</Label>
+                      <p className="text-sm text-muted-foreground">PubkeyAuthentication — всегда должен быть включён, если заходите по ключу</p>
+                    </div>
+                    <Switch
+                      checked={sshConfig.pubkeyAuthentication}
+                      onCheckedChange={(v) => setSshConfig({ ...sshConfig, pubkeyAuthentication: v })}
+                    />
+                  </div>
+
+                  <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+                    {t("admin.settings.ssh_warning")}
+                    Перед изменением убедитесь, что у вас есть альтернативный способ доступа (например, консоль провайдера).
+                  </div>
+
+                  {sshMessage && (
+                    <p className={`text-sm ${sshMessage === t("admin.settings.saved") ? "text-emerald-500" : "text-destructive"}`}>
+                      {sshMessage}
+                    </p>
+                  )}
+
+                  <Button
+                    disabled={sshSaving}
+                    onClick={async () => {
+                      setSshSaving(true);
+                      setSshMessage("");
+                      try {
+                        const updated = await api.updateSshConfig(token, sshConfig);
+                        setSshConfig(updated);
+                        setSshMessage(t("admin.settings.saved"));
+                      } catch (e) {
+                        setSshMessage(e instanceof Error ? e.message : t("admin.settings.error"));
+                      } finally {
+                        setSshSaving(false);
+                      }
+                    }}
+                  >
+                    {sshSaving ? t("admin.settings.saving") : t("admin.settings.ssh_apply")}
+                  </Button>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="proxy-settings">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-orange-500/10 via-red-500/10 to-rose-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-orange-500/5 via-transparent to-rose-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-orange-500/30 via-red-500/20 to-rose-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Shield className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-orange-500 via-red-500 to-rose-500">
+                    {t("admin.settings.proxy_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.proxy_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-5 p-4 sm:p-6">
+              <div className="rounded-2xl border border-orange-500/20 bg-gradient-to-br from-orange-500/5 via-red-500/5 to-rose-500/5 p-5 space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="h-9 w-9 rounded-xl bg-orange-500/15 flex items-center justify-center shrink-0"><Shield className="h-4 w-4 text-orange-500" /></div>
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-base font-semibold mb-1">{t("admin.settings.proxy_enabled")}</h3>
+                    <p className="text-xs text-muted-foreground">Глобальный переключатель — выключает ВСЕ прокси-маршруты сразу. Если выключен, бот/платежи/AI ходят напрямую.</p>
+                  </div>
+                  <Switch
+                    checked={settings.proxyEnabled ?? false}
+                    onCheckedChange={(v) => setSettings({ ...settings, proxyEnabled: v })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Proxy URL</Label>
+                  <Input
+                    placeholder="http://user:pass@host:port или socks5://user:pass@host:port"
+                    value={settings.proxyUrl ?? ""}
+                    onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value || null })}
+                    disabled={!settings.proxyEnabled}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground">Протоколы: <code className="bg-muted/40 px-1 py-0.5 rounded">http://</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">https://</code> · <code className="bg-muted/40 px-1 py-0.5 rounded">socks5://</code></p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-red-500/20 bg-gradient-to-br from-red-500/5 via-rose-500/5 to-pink-500/5 p-5 space-y-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-8 w-8 rounded-xl bg-red-500/20 flex items-center justify-center"><Network className="h-4 w-4 text-red-500" /></div>
+                  <h3 className="text-base font-semibold">{t("admin.settings.proxy_routing")}</h3>
+                </div>
+                <p className="text-xs text-muted-foreground">Какие сервисы пускать через прокси. Можно гибко включать/выключать по одному.</p>
+
+                <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                  <div className="h-9 w-9 rounded-xl bg-sky-500/10 flex items-center justify-center shrink-0"><MessageCircle className="h-4 w-4 text-sky-500" /></div>
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-sm font-medium cursor-pointer">{t("admin.settings.proxy_telegram")}</Label>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">Бот, уведомления, отправка сообщений в Telegram</p>
+                  </div>
+                  <Switch
+                    checked={settings.proxyTelegram ?? false}
+                    onCheckedChange={(v) => setSettings({ ...settings, proxyTelegram: v })}
+                    disabled={!settings.proxyEnabled}
+                  />
+                </label>
+
+                <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                  <div className="h-9 w-9 rounded-xl bg-amber-500/10 flex items-center justify-center shrink-0"><CreditCard className="h-4 w-4 text-amber-500" /></div>
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-sm font-medium cursor-pointer">{t("admin.settings.proxy_payments")}</Label>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">Platega, YooKassa, YooMoney, CryptoPay, Heleket</p>
+                  </div>
+                  <Switch
+                    checked={settings.proxyPayments ?? false}
+                    onCheckedChange={(v) => setSettings({ ...settings, proxyPayments: v })}
+                    disabled={!settings.proxyEnabled}
+                  /></label>
+                <label className="flex items-start gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                  <div className="h-9 w-9 rounded-xl bg-fuchsia-500/10 flex items-center justify-center shrink-0"><Sparkles className="h-4 w-4 text-fuchsia-500" /></div>
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-sm font-medium cursor-pointer">AI чат</Label>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">Запросы к Groq API (api.groq.com) — нужен прокси если хостинг блочит их IP</p>
+                  </div>
+                  <Switch
+                    checked={settings.proxyAi ?? false}
+                    onCheckedChange={(v) => setSettings({ ...settings, proxyAi: v })}
+                    disabled={!settings.proxyEnabled}
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-4 flex items-start gap-3">
+                <Sparkles className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  <strong>Важно:</strong> после изменения настроек прокси для Telegram бота необходимо перезапустить контейнер бота,
+                  чтобы он подключился через новый прокси.
+                </p>
+              </div>
+
               <Button
-                variant="outline"
-                onClick={handleSyncFromRemna}
-                disabled={syncLoading !== null}
+                onClick={(e) => {
+                  handleSubmit(e as unknown as React.FormEvent);
+                }}
+                disabled={saving}
+                className="w-full sm:w-auto h-11 px-6 rounded-xl bg-gradient-to-r from-orange-500 to-rose-500 hover:opacity-90 text-white font-semibold shadow-lg shadow-orange-500/20"
               >
-                <Download className="h-4 w-4 mr-2" />
-                {syncLoading === "from" ? "Синхронизация…" : "Из Remna → панель"}
+                {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
+                {saving ? t("admin.settings.saving") : t("admin.settings.save")}
               </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="nalog-settings">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-yellow-600/10 via-amber-600/10 to-orange-600/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-yellow-600/5 via-transparent to-orange-600/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-yellow-600/30 via-amber-600/20 to-orange-600/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <FileText className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-yellow-600 via-amber-600 to-orange-600">
+                    {t("admin.settings.nalog_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.nalog_subtitle")} {t("admin.settings.nalog_selfemployed_hint")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-4 p-4 sm:p-6">
+              <div className="flex items-center justify-between rounded-lg border p-4">
+                <div className="space-y-0.5">
+                  <Label className="text-base font-medium">{t("admin.settings.nalog_enabled")}</Label>
+                  <p className="text-sm text-muted-foreground">{t("admin.settings.nalog_enabled_hint")}</p>
+                </div>
+                <Switch
+                  checked={settings.nalogEnabled ?? false}
+                  onCheckedChange={(v) => setSettings({ ...settings, nalogEnabled: v })}
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="nalog-inn">{t("admin.settings.nalog_inn")}</Label>
+                <Input
+                  id="nalog-inn"
+                  placeholder="123456789012"
+                  maxLength={12}
+                  value={settings.nalogInn ?? ""}
+                  onChange={(e) => setSettings({ ...settings, nalogInn: e.target.value || null })}
+                  disabled={!settings.nalogEnabled}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.nalog_inn_hint")}</p>
+              </div>
+
+              <div>
+                <Label htmlFor="nalog-password">{t("admin.settings.nalog_password")}</Label>
+                <Input
+                  id="nalog-password"
+                  type="password"
+                  placeholder="••••••••"
+                  value={settings.nalogPassword ?? ""}
+                  onChange={(e) => setSettings({ ...settings, nalogPassword: e.target.value || null })}
+                  disabled={!settings.nalogEnabled}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.nalog_password_hint")}</p>
+              </div>
+
+              <div>
+                <Label htmlFor="nalog-service-name">{t("admin.settings.nalog_service_name")}</Label>
+                <Input
+                  id="nalog-service-name"
+                  placeholder="Оплата VPN-подписки"
+                  value={settings.nalogServiceName ?? ""}
+                  onChange={(e) => setSettings({ ...settings, nalogServiceName: e.target.value || null })}
+                  disabled={!settings.nalogEnabled}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.nalog_service_name_hint")}</p>
+              </div>
+
+              <div>
+                <Label htmlFor="nalog-device-id">{t("admin.settings.nalog_device_id")}</Label>
+                <Input
+                  id="nalog-device-id"
+                  placeholder="stealthnet-bot-nalog"
+                  value={settings.nalogDeviceId ?? ""}
+                  onChange={(e) => setSettings({ ...settings, nalogDeviceId: e.target.value || null })}
+                  disabled={!settings.nalogEnabled}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t("admin.settings.nalog_device_id_hint")}</p>
+              </div>
+
+              <div className="flex flex-wrap gap-3 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!settings.nalogEnabled || !settings.nalogInn || !settings.nalogPassword}
+                  onClick={async () => {
+                    setMessage("");
+                    try {
+                      const result = await api.testNalogConnection(token!);
+                      setMessage(result.ok ? t("admin.settings.nalog_test_success", { inn: result.inn }) : t("admin.settings.nalog_test_error", { error: result.error }));
+                    } catch {
+                      setMessage(t("admin.settings.nalog_test_failed"));
+                    }
+                  }}
+                >
+                  {t("admin.settings.nalog_test")}
+                </Button>
+                <Button
+                  onClick={(e) => {
+                    handleSubmit(e as unknown as React.FormEvent);
+                  }}
+                  disabled={saving}
+                >
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
+              </div>
+
+              <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 text-sm text-blue-200 space-y-2">
+                <p><strong>{t("admin.settings.nalog_how_title")}</strong></p>
+                <ul className="list-disc list-inside space-y-1 text-xs">
+                  <li>{t("admin.settings.nalog_how_1")}</li>
+                  <li>{t("admin.settings.nalog_how_2")}</li>
+                  <li>{t("admin.settings.nalog_how_3")}</li>
+                  <li>{t("admin.settings.nalog_how_4")}</li>
+                </ul>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="geo-map">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-teal-500/10 via-cyan-500/10 to-sky-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-teal-500/5 via-transparent to-sky-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-teal-500/30 via-cyan-500/20 to-sky-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <MapPin className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-teal-500 via-cyan-500 to-sky-500">
+                    {t("admin.settings.map_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.map_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
+              <div className="flex items-center justify-between rounded-lg border p-4">
+                <div className="space-y-0.5">
+                  <Label className="text-base font-medium">{t("admin.settings.map_enabled")}</Label>
+                  <p className="text-sm text-muted-foreground">{t("admin.settings.map_enabled_hint")}</p>
+                </div>
+                <Switch
+                  checked={settings.geoMapEnabled ?? false}
+                  onCheckedChange={(v) => setSettings({ ...settings, geoMapEnabled: v })}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t("admin.settings.map_cache_ttl")}</Label>
+                <Input
+                  type="number"
+                  min={10}
+                  max={3600}
+                  placeholder="60"
+                  value={settings.geoCacheTtl ?? 60}
+                  onChange={(e) => setSettings({ ...settings, geoCacheTtl: parseInt(e.target.value) || 60 })}
+                  disabled={!settings.geoMapEnabled}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("admin.settings.map_cache_ttl_hint")}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t("admin.settings.map_maxmind_path")}</Label>
+                <Input
+                  placeholder="./data/GeoLite2-City.mmdb"
+                  value={settings.maxmindDbPath ?? ""}
+                  onChange={(e) => setSettings({ ...settings, maxmindDbPath: e.target.value || null })}
+                  disabled={!settings.geoMapEnabled}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("admin.settings.map_maxmind_hint")}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 text-sm text-blue-200 space-y-2">
+                <p><strong>{t("admin.settings.map_maxmind_title")}</strong></p>
+                <ul className="list-disc list-inside space-y-1 text-xs">
+                  <li>{t("admin.settings.map_maxmind_1")}</li>
+                  <li>{t("admin.settings.map_maxmind_2")}</li>
+                  <li>{t("admin.settings.map_maxmind_3")}</li>
+                  <li>{t("admin.settings.map_maxmind_4")}</li>
+                </ul>
+              </div>
+
               <Button
-                variant="outline"
-                onClick={handleSyncToRemna}
-                disabled={syncLoading !== null}
+                onClick={(e) => {
+                  handleSubmit(e as unknown as React.FormEvent);
+                }}
+                disabled={saving}
               >
-                <Upload className="h-4 w-4 mr-2" />
-                {syncLoading === "to" ? "Синхронизация…" : "Панель → в Remna"}
+                {saving ? t("admin.settings.saving") : t("admin.settings.save")}
               </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="gifts">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-pink-500/10 via-fuchsia-500/10 to-rose-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-pink-500/5 via-transparent to-rose-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-pink-500/30 via-fuchsia-500/20 to-rose-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <Gift className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-pink-500 via-fuchsia-500 to-rose-500">
+                    Подарки и доп. подписки
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">Настройки системы подарков, кодов и дополнительных подписок</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-6 p-4 sm:p-6">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="gift-subscriptions-enabled"
+                  checked={!!settings.giftSubscriptionsEnabled}
+                  onCheckedChange={(checked: boolean) =>
+                    setSettings((s) => (s ? { ...s, giftSubscriptionsEnabled: checked === true } : s))
+                  }
+                />
+                <div>
+                  <Label htmlFor="gift-subscriptions-enabled" className="text-base font-medium cursor-pointer">
+                    Включить систему подарков
+                  </Label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Разрешить клиентам покупать дополнительные подписки и дарить их другим пользователям
+                  </p>
+                </div>
+              </div>
+
+              {settings.giftSubscriptionsEnabled && (
+                <div className="space-y-6 pl-4 border-l-2 border-primary/30">
+                  <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Gift className="h-4 w-4 text-primary shrink-0" />
+                      <Label className="text-base font-medium">Основные настройки</Label>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="gift-code-expiry-hours">Срок действия кода (часы)</Label>
+                        <Input
+                          id="gift-code-expiry-hours"
+                          type="number"
+                          min={1}
+                          value={settings.giftCodeExpiryHours ?? 72}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, giftCodeExpiryHours: parseInt(e.target.value, 10) || 72 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Через сколько часов истекает неиспользованный подарочный код
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="max-additional-subscriptions">Макс. доп. подписок</Label>
+                        <Input
+                          id="max-additional-subscriptions"
+                          type="number"
+                          min={1}
+                          value={settings.maxAdditionalSubscriptions ?? 5}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, maxAdditionalSubscriptions: parseInt(e.target.value, 10) || 5 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Максимальное количество дополнительных подписок на одного клиента
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Settings2 className="h-4 w-4 text-primary shrink-0" />
+                      <Label className="text-base font-medium">Коды и лимиты</Label>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="gift-code-format-length">Длина кода</Label>
+                        <Input
+                          id="gift-code-format-length"
+                          type="number"
+                          min={6}
+                          max={24}
+                          value={settings.giftCodeFormatLength ?? 12}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, giftCodeFormatLength: parseInt(e.target.value, 10) || 12 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Количество символов в подарочном коде (формат XXXX-XXXX-XXXX)
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="gift-rate-limit">Лимит попыток/мин</Label>
+                        <Input
+                          id="gift-rate-limit"
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={settings.giftRateLimitPerMinute ?? 5}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, giftRateLimitPerMinute: parseInt(e.target.value, 10) || 5 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Максимум попыток активации подарочного кода в минуту (защита от перебора)
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="gift-message-max-length">Макс. длина сообщения</Label>
+                        <Input
+                          id="gift-message-max-length"
+                          type="number"
+                          min={0}
+                          max={1000}
+                          value={settings.giftMessageMaxLength ?? 200}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, giftMessageMaxLength: parseInt(e.target.value, 10) || 200 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Максимальная длина персонального сообщения к подарку
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Users className="h-4 w-4 text-primary shrink-0" />
+                      <Label className="text-base font-medium">Уведомления и рефералы</Label>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="gift-expiry-notification-days">Уведомление за (дни)</Label>
+                        <Input
+                          id="gift-expiry-notification-days"
+                          type="number"
+                          min={0}
+                          max={30}
+                          value={settings.giftExpiryNotificationDays ?? 3}
+                          onChange={(e) =>
+                            setSettings((s) => (s ? { ...s, giftExpiryNotificationDays: parseInt(e.target.value, 10) || 3 } : s))
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          За сколько дней до истечения подарочной подписки уведомлять пользователя
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40">
+                        <Switch
+                          id="gift-referral-enabled"
+                          checked={settings.giftReferralEnabled !== false}
+                          onCheckedChange={(checked: boolean) =>
+                            setSettings((s) => (s ? { ...s, giftReferralEnabled: checked === true } : s))
+                          }
+                        />
+                        <div>
+                          <Label htmlFor="gift-referral-enabled" className="text-sm font-medium cursor-pointer">
+                            Реферальная связь через подарки
+                          </Label>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            При активации подарка новым пользователем, отправитель становится его рефералом
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {message && <p className="text-sm text-muted-foreground">{message}</p>}
               <Button
-                variant="outline"
-                onClick={handleSyncCreateRemnaForMissing}
-                disabled={syncLoading !== null}
+                type="button"
+                disabled={saving}
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleSubmit(e as unknown as React.FormEvent);
+                }}
               >
-                <Link2 className="h-4 w-4 mr-2" />
-                {syncLoading === "missing" ? "Выполняется…" : "Привязать клиентов без Remna"}
+                {saving ? t("admin.settings.saving") : t("admin.settings.save")}
               </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="sync">
+          <Card className="overflow-hidden border-white/10">
+            <div className="relative bg-gradient-to-br from-violet-500/10 via-indigo-500/10 to-blue-500/10 p-6 sm:p-8 border-b border-white/10">
+              <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 via-transparent to-blue-500/5 pointer-events-none" />
+              <div className="relative flex items-start gap-5">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-violet-500/30 via-indigo-500/20 to-blue-500/30 flex items-center justify-center shadow-xl border border-white/20 shrink-0">
+                  <ArrowLeftRight className="h-7 w-7 text-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-violet-500 via-indigo-500 to-blue-500">
+                    {t("admin.settings.sync_title")}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{t("admin.settings.sync_subtitle")}</p>
+                </div>
+              </div>
+            </div>
+            <CardContent className="space-y-4 p-4 sm:p-6">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <button type="button" onClick={handleSyncFromRemna} disabled={syncLoading !== null} className="group relative overflow-hidden rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-500/10 via-violet-500/5 to-transparent p-5 text-left transition-all hover:border-violet-500/50 hover:shadow-lg hover:shadow-violet-500/10 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <div className="absolute -top-4 -right-4 w-20 h-20 rounded-full bg-violet-500/10 blur-2xl group-hover:bg-violet-500/20 transition-colors" />
+                  <div className="relative flex items-center gap-3 mb-2">
+                    <div className="h-10 w-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                      {syncLoading === "from" ? <Loader2 className="h-5 w-5 text-violet-500 animate-spin" /> : <Download className="h-5 w-5 text-violet-500" />}
+                    </div>
+                    <span className="text-sm font-bold uppercase tracking-wider text-violet-500/80">From Remna →</span>
+                  </div>
+                  <div className="relative text-base font-semibold mb-1">{syncLoading === "from" ? t("admin.settings.sync_in_progress") : t("admin.settings.sync_from_remna")}</div>
+                  <p className="relative text-xs text-muted-foreground">Подтянуть всех клиентов и подписки из Remna в локальную БД</p>
+                </button>
+
+                <button type="button" onClick={handleSyncToRemna} disabled={syncLoading !== null} className="group relative overflow-hidden rounded-2xl border border-indigo-500/30 bg-gradient-to-br from-indigo-500/10 via-indigo-500/5 to-transparent p-5 text-left transition-all hover:border-indigo-500/50 hover:shadow-lg hover:shadow-indigo-500/10 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <div className="absolute -top-4 -right-4 w-20 h-20 rounded-full bg-indigo-500/10 blur-2xl group-hover:bg-indigo-500/20 transition-colors" />
+                  <div className="relative flex items-center gap-3 mb-2">
+                    <div className="h-10 w-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
+                      {syncLoading === "to" ? <Loader2 className="h-5 w-5 text-indigo-500 animate-spin" /> : <Upload className="h-5 w-5 text-indigo-500" />}
+                    </div>
+                    <span className="text-sm font-bold uppercase tracking-wider text-indigo-500/80">→ To Remna</span>
+                  </div>
+                  <div className="relative text-base font-semibold mb-1">{syncLoading === "to" ? t("admin.settings.sync_in_progress") : t("admin.settings.sync_to_remna")}</div>
+                  <p className="relative text-xs text-muted-foreground">Записать локальные изменения обратно в Remna-панель</p>
+                </button>
+
+                <button type="button" onClick={handleSyncCreateRemnaForMissing} disabled={syncLoading !== null} className="group relative overflow-hidden rounded-2xl border border-blue-500/30 bg-gradient-to-br from-blue-500/10 via-blue-500/5 to-transparent p-5 text-left transition-all hover:border-blue-500/50 hover:shadow-lg hover:shadow-blue-500/10 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <div className="absolute -top-4 -right-4 w-20 h-20 rounded-full bg-blue-500/10 blur-2xl group-hover:bg-blue-500/20 transition-colors" />
+                  <div className="relative flex items-center gap-3 mb-2">
+                    <div className="h-10 w-10 rounded-xl bg-blue-500/20 flex items-center justify-center">
+                      {syncLoading === "missing" ? <Loader2 className="h-5 w-5 text-blue-500 animate-spin" /> : <Link2 className="h-5 w-5 text-blue-500" />}
+                    </div>
+                    <span className="text-sm font-bold uppercase tracking-wider text-blue-500/80">+ Создать</span>
+                  </div>
+                  <div className="relative text-base font-semibold mb-1">{syncLoading === "missing" ? t("admin.settings.sync_running") : t("admin.settings.sync_create_missing")}</div>
+                  <p className="relative text-xs text-muted-foreground">Создать в Remna записи для клиентов, которых там нет</p>
+                </button>
+              </div>
               {syncMessage && (
-                <span className="text-sm text-muted-foreground">{syncMessage}</span>
+                <div className="rounded-xl border border-white/10 bg-card/40 p-4 text-sm">{syncMessage}</div>
               )}
             </CardContent>
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={twoFaEnableOpen} onOpenChange={(open) => !open && closeTwoFaEnable()}>
+        <DialogContent className="max-w-sm" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-5 w-5" />
+              {t("admin.settings.2fa_enable_title")}
+            </DialogTitle>
+            <DialogDescription>
+              {twoFaStep === 1
+                ? t("admin.settings.2fa_scan_hint")
+                : t("admin.settings.2fa_enter_code")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-4 py-2">
+            {twoFaLoading && !twoFaSetupData ? (
+              <div className="flex justify-center py-8">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : twoFaStep === 1 && twoFaSetupData ? (
+              <>
+                <div className="flex justify-center rounded-xl bg-white p-4 dark:bg-white/95">
+                  <QRCodeSVG value={twoFaSetupData.otpauthUrl} size={200} level="M" />
+                </div>
+                <p className="text-xs text-muted-foreground break-all font-mono bg-muted/50 rounded-lg p-2">{twoFaSetupData.secret}</p>
+                <Button onClick={() => setTwoFaStep(2)}>{t("admin.settings.2fa_next")}</Button>
+              </>
+            ) : twoFaStep === 2 ? (
+              <>
+                <Input
+                  placeholder="000000"
+                  maxLength={6}
+                  value={twoFaCode}
+                  onChange={(e) => setTwoFaCode(e.target.value.replace(/\D/g, ""))}
+                  className="text-center text-lg tracking-[0.4em] font-mono"
+                />
+                <Button onClick={confirmTwoFaEnable} disabled={twoFaLoading || twoFaCode.length !== 6}>
+                  {twoFaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {t("admin.settings.2fa_confirm")}
+                </Button>
+              </>
+            ) : null}
+            {twoFaError && <p className="text-sm text-destructive">{twoFaError}</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={twoFaDisableOpen} onOpenChange={(open) => !open && setTwoFaDisableOpen(false)}>
+        <DialogContent className="max-w-sm" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>{t("admin.settings.2fa_disable_title")}</DialogTitle>
+            <DialogDescription>
+              {t("admin.settings.2fa_disable_hint")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-4 py-2">
+            <Input
+              placeholder="000000"
+              maxLength={6}
+              value={twoFaCode}
+              onChange={(e) => setTwoFaCode(e.target.value.replace(/\D/g, ""))}
+              className="text-center text-lg tracking-[0.4em] font-mono"
+            />
+            <Button onClick={confirmTwoFaDisable} disabled={twoFaLoading || twoFaCode.length !== 6}>
+              {twoFaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {t("admin.settings.2fa_disable_btn")}
+            </Button>
+            {twoFaError && <p className="text-sm text-destructive">{twoFaError}</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ─── Sortable cards для кнопок главного меню ────
+
+function BotButtonsList({
+  buttons,
+  onChange,
+}: {
+  buttons: BotButtonItem[];
+  onChange: (updated: BotButtonItem[]) => void;
+}) {
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+
+  const handleDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const oldIdx = buttons.findIndex((b) => b.id === active.id);
+    const newIdx = buttons.findIndex((b) => b.id === over.id);
+    if (oldIdx < 0 || newIdx < 0) return;
+    const reordered = arrayMove(buttons, oldIdx, newIdx);
+    // Пересчитываем order по позиции в списке (1, 2, 3, ...). Стабильность других полей сохраняется.
+    const withOrder = reordered.map((b, idx) => ({ ...b, order: idx + 1 }));
+    onChange(withOrder);
+  };
+
+  const updateButton = (id: string, patch: Partial<BotButtonItem>) => {
+    onChange(buttons.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={buttons.map((b) => b.id)} strategy={verticalListSortingStrategy}>
+        <div className="space-y-2">
+          {buttons.map((btn, idx) => (
+            <SortableBotButtonCard
+              key={btn.id}
+              btn={btn}
+              idx={idx}
+              onUpdate={(patch) => updateButton(btn.id, patch)}
+            />
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
+function SortableBotButtonCard({
+  btn,
+  idx,
+  onUpdate,
+}: {
+  btn: BotButtonItem;
+  idx: number;
+  onUpdate: (patch: Partial<BotButtonItem>) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: btn.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  const swatch = BOT_STYLE_OPTIONS.find((o) => o.value === (btn.style ?? ""))?.swatch ?? "bg-slate-400";
+  const styleLabel = BOT_STYLE_OPTIONS.find((o) => o.value === (btn.style ?? ""))?.label ?? "По умолчанию";
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`group rounded-2xl border bg-gradient-to-br from-white/[0.04] to-white/[0.02] backdrop-blur p-3 transition-all hover:from-white/[0.06] hover:to-white/[0.03] ${
+        btn.visible ? "border-white/10" : "border-white/5 opacity-50"
+      } ${isDragging ? "shadow-2xl ring-2 ring-sky-500/40 z-10" : ""}`}
+    >
+      <div className="flex items-center gap-2 mb-2.5">
+        <button
+          type="button"
+          className="cursor-grab active:cursor-grabbing touch-none p-1 rounded-md hover:bg-white/10 transition-colors shrink-0"
+          {...attributes}
+          {...listeners}
+          title="Перетащите чтобы изменить порядок"
+        >
+          <GripVertical className="h-4 w-4 text-muted-foreground" />
+        </button>
+        <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500/30 to-blue-500/20 text-sky-200 text-xs font-bold border border-sky-500/30 shrink-0">
+          {idx + 1}
+        </span>
+        <span className={`h-3 w-3 rounded-full ${swatch} shrink-0 ring-2 ring-white/10`} title={styleLabel} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold truncate">{BOT_BUTTON_HUMAN_NAMES[btn.id] ?? btn.id}</span>
+            <code className="text-[10px] text-muted-foreground bg-white/[0.04] rounded px-1.5 py-0.5 hidden sm:inline">{btn.id}</code>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <Switch checked={btn.visible} onCheckedChange={(checked: boolean) => onUpdate({ visible: checked === true })} />
+          <Label className="text-xs text-muted-foreground cursor-pointer">{btn.visible ? "Виден" : "Скрыт"}</Label>
+        </div>
+      </div>
+
+      {/* Preview как будет выглядеть кнопка в боте */}
+      <div className="mb-2.5 p-2 rounded-lg bg-background/40 border border-white/5">
+        <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+          <Eye className="h-3 w-3" />
+          Предпросмотр
+        </div>
+        <div className={`inline-block px-3 py-1.5 rounded-lg text-sm font-medium ${
+          btn.style === "success" ? "bg-emerald-500/30 text-emerald-100 border border-emerald-500/40"
+          : btn.style === "danger" ? "bg-rose-500/30 text-rose-100 border border-rose-500/40"
+          : btn.style === "primary" ? "bg-sky-500/30 text-sky-100 border border-sky-500/40"
+          : "bg-white/10 text-foreground border border-white/15"
+        }`}>
+          {btn.label || "(пустое название)"}
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-[1fr_140px_140px_auto]">
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase text-muted-foreground tracking-wider">Текст кнопки</Label>
+          <Input className="h-9" value={btn.label} onChange={(e) => onUpdate({ label: e.target.value })} placeholder="🔌 Подключиться" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase text-muted-foreground tracking-wider">Иконка (premium)</Label>
+          <select
+            className="flex h-9 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+            value={btn.emojiKey ?? ""}
+            onChange={(e) => onUpdate({ emojiKey: e.target.value || undefined })}
+          >
+            <option value="">— нет —</option>
+            {BOT_EMOJI_KEYS.map((k) => (
+              <option key={k} value={k}>{BOT_EMOJI_LABELS[k] ?? k}</option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[10px] uppercase text-muted-foreground tracking-wider">Цвет</Label>
+          <select
+            className="flex h-9 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+            value={btn.style ?? ""}
+            onChange={(e) => onUpdate({ style: e.target.value })}
+          >
+            {BOT_STYLE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-end gap-1.5 pb-1">
+          <Switch
+            id={`onePerRow-${btn.id}`}
+            checked={btn.onePerRow === true}
+            onCheckedChange={(checked: boolean) => onUpdate({ onePerRow: checked === true })}
+          />
+          <Label htmlFor={`onePerRow-${btn.id}`} className="text-xs cursor-pointer whitespace-nowrap">Во всю ширину</Label>
+        </div>
+      </div>
     </div>
   );
 }
