@@ -1,43 +1,36 @@
 # Dependencies
 node_modules/
-
 # Build
 dist/
 build/
 *.tsbuildinfo
-
 # Env (конфигурация — не коммитить!)
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
 backend/.env
 bot/.env
-
 # Logs
 *.log
 logs/
-
 # IDE
 .idea/
 .vscode/
 .cursor/
 *.swp
 .DS_Store
-
 # Docker volumes
 postgres_data/
-
 # Prisma
 backend/prisma/migrations/*_migration.sql
-
 # Nginx: сгенерированный конфиг (создаётся install.sh, у каждого сервера свой)
-# Если файл уже в репозитории — один раз: git rm --cached nginx/nginx.conf && git commit -m "Stop tracking nginx.conf"
 nginx/nginx.conf
 nginx/ssl/
-
 # Frontend dist
 frontend/dist/
-
+# Backups
+*.bak
 # For Gemini
 output.xml
-.DS_Store
